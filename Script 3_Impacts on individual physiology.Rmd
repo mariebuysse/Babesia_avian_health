@@ -1,0 +1,793 @@
+---
+title: "Script 3 - Impacts on individual physiology"
+subtitle: "Blood parasites and avian health"
+author: "Marie Buysse, Mathilde Ollagnier, Charly Souc, Marjorie Bruley, Thomas Blanchon, Carole Leray, Marion Vittecoq and Karen D. McCoy"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0.Librairies
+```{r, message=FALSE, warning=FALSE}
+library(readxl) #read_excel function
+library(ggplot2)
+library(dplyr)
+library(kableExtra) #kable function
+library(ggpubr) #ggarrange function
+library(lme4) #lmer function
+library(MuMIn) #dredge function
+library(sjPlot) #tab_model function
+library(DHARMa) #simulateResiduals function
+library(lmtest) #bptest, dwtest functions
+```
+
+**Information about data visualisation:**\
+For a same variable, one data visualisation is based on fixed effect selected in the best-fitted model and most significant random effects. Another visualisation include the infection status or parasitemia, whether significant or not.
+
+# 1. Data
+## 1.1. Data loading
+```{r}
+data <- read_excel("Data_Impacts on individual physiology.xlsx")
+data$Site <- as.factor(data$Site)
+data$Sample <- as.factor(data$Sample)
+data$Year <- as.factor(data$Year)
+data$Age <- as.factor(data$Age)
+data$Status_qPCR <- as.factor(data$Status_qPCR)
+data$Ratio_qPCR <- as.numeric(data$Ratio_qPCR)
+data$ErrorRatio_qPCR <- as.numeric(data$ErrorRatio_qPCR)
+data$Hemoglobin <- as.numeric(data$Hemoglobin)
+data$Weight <- as.numeric(data$Weight)
+data$Tarsus <- as.numeric(data$Tarsus)
+data$RatioWT <- as.numeric(data$RatioWT)
+data$Sex <- as.factor(data$Sex)
+```
+With:\
+-Site: sampling colony (Carteau/Frioul)\
+-Sample: ID of individual bird\
+-Year: sampling year (2022/2023/2024)\
+-Age: age of bird (Chick/Adult)\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-Ratio_qPCR: quantification of *Babesia* based on qPCR technique (ratio *Larus*/*Babesia* copies of genes)\
+-ErrorRatio_qPCR: ratio error associated with `Ratio_qPCR`\
+-Hemoglobin: measure of circulating concentration of hemoglobin\
+-Tarsus: length of the tarsus\
+-Weight: bird weight\
+-RatioWT: ratio between `Weight` and `Tarsus`\
+-Sex: sex of bird (F/M)\  
+
+
+## 1.2. Preliminary analyses
+### 1.2.1. Metrics about parasitemia
+```{r}
+data_parasitemia <- data[!(is.na(data$Ratio_qPCR)), ]
+```
+
+```{r, message=FALSE, warning=FALSE}
+summary_table_parasitemia <- data_parasitemia %>%
+  group_by(Age) %>%
+  summarise(
+    Mean = mean(Ratio_qPCR),
+    SD = sd(Ratio_qPCR),
+    SE = sd(Ratio_qPCR, na.rm = TRUE) / sqrt(length(Ratio_qPCR)),
+    N = n())
+
+summary_table_parasitemia %>%
+  kable(caption = "Metrics about Ratio_qPCR based on Age") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+### 1.2.2. Circulating concentration of hemoglobin
+Let's see first if `Hemoglobin` levels are equivalent between chicks and adults:
+```{r}
+a <- data$Hemoglobin[data$Age=="Chick"]
+b <- data$Hemoglobin[data$Age=="Adult"]
+wilcox.test(a,b, paired=FALSE)
+```
+
+Since p-value is much smaller than 0.05 (< 2.2e-16), the `Hemoglobin` levels significantly differ between chicks and adults.\
+**`Hemoglobin` analyses will be conducted on separate datasets based on `Age`.**
+
+```{r}
+data_hemo <- data[!(is.na(data$Hemoglobin)), ]
+data_hemo_adults <- filter(data_hemo, Age == "Adult")
+data_hemo_chicks <- filter(data_hemo, Age == "Chick")
+```
+
+Here are some metrics about `Hemoglobin` for each dataset:
+```{r, message=FALSE, warning=FALSE}
+summary_table_1 <- data_hemo %>%
+  group_by(Age) %>%
+  summarise(
+    Mean = mean(Hemoglobin),
+    SD = sd(Hemoglobin),
+    SE = sd(Hemoglobin, na.rm = TRUE) / sqrt(length(Hemoglobin)),
+    N = n(),
+    CI_lower = Mean - qt(0.975, df = N - 1) * (SD / sqrt(N)),
+    CI_upper = Mean + qt(0.975, df = N - 1) * (SD / sqrt(N))
+  )
+
+summary_table_1 %>%
+  kable(caption = "Metrics about Hemoglobin based on Age") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+data_hemo_stats <- data_hemo[!(is.na(data_hemo$Status_qPCR)), ]
+summary_table_2 <- data_hemo_stats %>%
+  group_by(Age, Status_qPCR) %>%
+  summarise(
+    Mean = mean(Hemoglobin),
+    SD = sd(Hemoglobin),
+    SE = sd(Hemoglobin, na.rm = TRUE) / sqrt(length(Hemoglobin)),
+    N = n(),
+    CI_lower = Mean - qt(0.975, df = N - 1) * (SD / sqrt(N)),
+    CI_upper = Mean + qt(0.975, df = N - 1) * (SD / sqrt(N))
+  )
+
+summary_table_2 %>%
+  kable(caption = "Metrics about Hemoglobin based on Age and infection status") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+### 1.2.2.1. Data distribution of `Hemoglobin` in adults
+In the dataset `data_hemo_adults`:
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_hemo_adults, aes(x=Hemoglobin)) + geom_histogram()
+shapiro.test(data_hemo_adults$Hemoglobin)
+```
+Since p-value is greater than 0.05 (p-value = 0.2172), **`data_hemo_adults$Hemoblobin` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\  
+
+In the dataset `data_hemo_adults` with only individuals with `Ratio_qPCR`:
+```{r}
+data_hemo_ad_ratioBab <- data_hemo_adults[!(is.na(data_hemo_adults$Ratio_qPCR)), ]
+```
+
+Considering that this dataset includes only 10 individuals, **the impact of the parasitemia (`Ratio_qPCR`) on `Hemoglobin` in adults will not be examined by models but rather by simple comparison tests**.\ 
+
+
+### 1.2.2.2. Data distribution of `Hemoglobin` in chicks
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_hemo_chicks, aes(x=Hemoglobin)) + geom_histogram()
+shapiro.test(data_hemo_chicks$Hemoglobin)
+```
+Since p-value is greater than 0.05 (p-value = 0.6399), **`data_hemo_chicks$Hemoblobin` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\  
+
+In the dataset `data_hemo_chicks` with only individuals with `Ratio_qPCR`:
+```{r}
+data_hemo_ch_ratioBab <- data_hemo_chicks[!(is.na(data_hemo_chicks$Ratio_qPCR)), ]
+data_hemo_ch_ratioBab <- data_hemo_ch_ratioBab[!(is.na(data_hemo_ch_ratioBab$ErrorRatio_qPCR)), ]
+
+ggplot(data_hemo_ch_ratioBab, aes(x=Hemoglobin)) + geom_histogram()
+shapiro.test(data_hemo_ch_ratioBab$Hemoglobin)
+```
+Since p-value is greater than 0.05 (p-value = 0.9963), **`data_hemo_ch_ratioBab$Hemoblobin` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\  
+
+
+### 1.2.3. Body condition
+**Body condition is considered as `RatioWT`.**\  
+
+Let's see first if `RatioWT` levels are equivalent between chicks and adults:
+```{r}
+c <- data$RatioWT[data$Age=="Chick"]
+d <- data$RatioWT[data$Age=="Adult"]
+wilcox.test(c,d, paired=FALSE)
+```
+
+Since p-value is much smaller than 0.05 (< 2.2e-16), the `RatioWT` levels significantly differ between chicks and adults.\
+**`RatioWT` analyses will be conducted on separate datasets based on `Age`.**
+
+```{r}
+data_ratiowt <- data[!(is.na(data$RatioWT)), ]
+data_ratiowt_adults <- filter(data_ratiowt, Age == "Adult")
+data_ratiowt_chicks <- filter(data_ratiowt, Age == "Chick")
+```
+
+Here are some metrics about `RatioWT` for each dataset:
+```{r, message=FALSE, warning=FALSE}
+summary_table_1 <- data_ratiowt %>%
+  group_by(Age) %>%
+  summarise(
+    Mean = mean(RatioWT),
+    SD = sd(RatioWT),
+    SE = sd(RatioWT, na.rm = TRUE) / sqrt(length(RatioWT)),
+    N = n(),
+    CI_lower = Mean - qt(0.975, df = N - 1) * (SD / sqrt(N)),
+    CI_upper = Mean + qt(0.975, df = N - 1) * (SD / sqrt(N))
+  )
+
+summary_table_1 %>%
+  kable(caption = "Metrics about RatioWT based on Age") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+data_ratiowt_stats <- data_ratiowt[!(is.na(data_ratiowt$Status_qPCR)), ]
+summary_table_2 <- data_ratiowt_stats %>%
+  group_by(Age, Status_qPCR) %>%
+  summarise(
+    Mean = mean(RatioWT),
+    SD = sd(RatioWT),
+    SE = sd(RatioWT, na.rm = TRUE) / sqrt(length(RatioWT)),
+    N = n(),
+    CI_lower = Mean - qt(0.975, df = N - 1) * (SD / sqrt(N)),
+    CI_upper = Mean + qt(0.975, df = N - 1) * (SD / sqrt(N))
+  )
+
+summary_table_2 %>%
+  kable(caption = "Metrics about RatioWT based on Age and infection status") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+### 1.2.3.1. Data distribution of `RatioWT` in adults 
+In the dataset `data_ratiowt_adults`:
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_ratiowt_adults, aes(x=RatioWT)) + geom_histogram()
+shapiro.test(data_ratiowt_adults$RatioWT)
+```
+Since p-value is greater than 0.05 (p-value = 0.7556), **`data_ratiowt_adults$RatioWT` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\
+
+In the dataset `data_ratiowt_adults` with only individuals with `Ratio_qPCR`:
+```{r}
+data_ratiowt_ad_ratioBab <- data_ratiowt_adults[!(is.na(data_ratiowt_adults$Ratio_qPCR)), ]
+```
+
+Considering that this dataset includes only 10 individuals, **the impact of the parasitemia (`Ratio_qPCR`) on `RatioWT` in adults will not be examined by models but rather by simple comparison tests**.\   
+
+
+### 1.2.3.2. Data distribution of `RatioWT` in chicks
+In the dataset `data_ratiowt_chicks`:
+```{r, message=FALSE, warning=FALSE}
+e <- ggplot(data_ratiowt_chicks, aes(x=RatioWT)) + geom_histogram()
+shap_test1 <- shapiro.test(data_ratiowt_chicks$RatioWT)
+
+data_ratiowt_chicks$log_ratiowt <- log10(data_ratiowt_chicks$RatioWT)
+f <- ggplot(data_ratiowt_chicks, aes(x=log_ratiowt)) + geom_histogram()
+shap_test2 <- shapiro.test(data_ratiowt_chicks$log_ratiowt)
+
+ggarrange(e,f, labels = c("RatioWT in data_ratiowt_chicks", "log10(RatioWT) in data_ratiowt_chicks"), ncol = 1, nrow = 2)
+
+shapiro_results_hemo <- data.frame(
+  Tests = c("Shapiro test on RatioWT in chicks", "Shapiro test on log10(RatioWT) in chicks"),
+  p_value = c(shap_test1$p.value, shap_test2$p.value))
+
+shapiro_results_hemo %>%
+  kable(caption = "Shapiro test results for RatioWT in data_ratiowt_chicks") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+Since p-value is greater than 0.05 (p-value = 0.4810149), **`data_ratiowt_chicks$log_ratiowt` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\  
+
+In the dataset `data_ratiowt_chicks` with only individuals with `Ratio_qPCR`:
+```{r, message=FALSE, warning=FALSE}
+data_ratiowt_ch_ratioBab <- data_ratiowt_chicks[!(is.na(data_ratiowt_chicks$Ratio_qPCR)), ]
+data_ratiowt_ch_ratioBab <- data_ratiowt_ch_ratioBab[!(is.na(data_ratiowt_ch_ratioBab$ErrorRatio_qPCR)), ]
+
+ggplot(data_ratiowt_ch_ratioBab, aes(x=RatioWT)) + geom_histogram()
+shapiro.test(data_ratiowt_ch_ratioBab$RatioWT)
+```
+Since p-value is greater than 0.05 (p-value = 0.3707), **`data_ratiowt_ch_ratioBab$RatioWT` variable is normally distributed**. We will perform the analyses using LMER and check for distribution of model residuals.\  
+
+
+# 2. Effects of infection on circulating concentration of hemoglobin
+## 2.1. Based on infectious status (binary: infected/uninfected)
+### 2.1.1. In adults
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_hemo_ad_model <- data_hemo_adults[!(is.na(data_hemo_adults$Status_qPCR)), ]
+data_hemo_ad_model <- data_hemo_ad_model[!(is.na(data_hemo_ad_model$Sex)), ]
+```
+
+We include the variables `Status_qPCR` and `RatioWT` as fixed effects and `Site`, `Sex`, and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_hemo_ad_full <- lmer(Hemoglobin ~ Status_qPCR * RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ad_model, na.action = na.fail)
+```
+
+We use the dredge function to compare models:
+```{r, message=FALSE, warning=FALSE}
+model_dredge_hemo_ad <- dredge(lmer_hemo_ad_full)
+model_dredge_hemo_ad
+```
+
+Based on `model_dredge_hemo_ad`, the model with the minimal AICc value is `RatioWT + (1|Site) + (1|Sex) + (1|Year)`.\
+To validate it as the best-fitted model, we compare it with all models having an AICc difference of 2 or less:
+```{r message=FALSE, warning=FALSE}
+lmer_hemo_ad_1 <- lmer(Hemoglobin ~ RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ad_model, na.action = na.fail)
+lmer_hemo_ad_2 <- lmer(Hemoglobin ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ad_model, na.action = na.fail)
+lmer_hemo_ad_3 <- lmer(Hemoglobin ~ RatioWT + Status_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ad_model, na.action = na.fail)
+lmer_hemo_ad_4 <- lmer(Hemoglobin ~ Status_qPCR * RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ad_model, na.action = na.fail)
+
+anova1 <- anova(lmer_hemo_ad_1, lmer_hemo_ad_2, test="Chisq")
+anova2 <- anova(lmer_hemo_ad_1, lmer_hemo_ad_3, test="Chisq")
+anova3 <- anova(lmer_hemo_ad_1, lmer_hemo_ad_4, test="Chisq")
+
+p_value_anova1 <- anova1$`Pr(>Chisq)`[2]
+p_value_anova2 <- anova2$`Pr(>Chisq)`[2]
+p_value_anova3 <- anova3$`Pr(>Chisq)`[2]
+
+anova_results_hemo_ad <- data.frame(
+  Comparison = c("RatioWT (best)",
+                 "best vs null",
+                 "best vs RatioWT + Status_qPCR",
+                 "best vs full"),
+  ANOVA_p_value = c("-", p_value_anova1, p_value_anova2, p_value_anova3),
+  AICc = c(AICc(lmer_hemo_ad_1), AICc(lmer_hemo_ad_2), AICc(lmer_hemo_ad_3),AICc(lmer_hemo_ad_4)))
+
+# Print the table with kable
+anova_results_hemo_ad %>%
+  kable(caption = "Results of comparison between best AICc model and other models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We can also compare them with `tab_model` function:
+```{r}
+tab_model(lmer_hemo_ad_1, lmer_hemo_ad_2, lmer_hemo_ad_3, lmer_hemo_ad_4, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, we select `RatioWT + (1|Site) + (1|Sex) + (1|Year)` as the best-fitted model.\
+
+We examine the best-fitted model:
+```{r}
+summary(lmer_hemo_ad_1)
+
+simulationOutput_hemo_ad <- simulateResiduals(fittedModel = lmer_hemo_ad_1, plot = F)
+plot(simulationOutput_hemo_ad)
+
+shapiro.test(residuals(lmer_hemo_ad_1))
+```
+
+**The ratio between mass/tarsus (body condition) is a fixed effect influencing the circulating concentration of hemoglobin in adults, but the presence of *Babesia* does not appear to have any impact.**\  
+
+Visualisation: 
+```{r}
+plotA <- ggplot(data_hemo_ad_model, aes(x= RatioWT, y= Hemoglobin, color=Sex, fill=Sex))+
+  geom_point() +
+  labs(x = "Ratio mass/tarsus (body condition)",
+       y = "Concentration of hemoglobin", 
+       title = "Hemoglobin in adults according to sex and body condition")+ 
+  theme(plot.title = element_text(size = 9)) + 
+  facet_grid(~Sex) + 
+  theme(legend.position = "none")
+
+plotB <- ggplot(data_hemo_ad_model, aes(x= Status_qPCR, y= Hemoglobin, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha= 0.5) + 
+  labs(x = "Infection status",
+       y = "Concentration of hemoglobin", 
+       title = "Hemoglobin in adults according to sex and infection status")+ 
+  theme(plot.title = element_text(size = 9), 
+        axis.text.x = element_blank()) + 
+  facet_grid(~Sex)
+
+ggarrange(plotA, plotB, nrow = 1, ncol = 2)
+```
+
+
+### 2.1.2. In chicks
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_hemo_ch_model <- data_hemo_chicks[!(is.na(data_hemo_chicks$Status_qPCR)), ]
+data_hemo_ch_model <- data_hemo_ch_model[!(is.na(data_hemo_ch_model$Sex)), ]
+```
+
+We include the variables `Status_qPCR` and `RatioWT` as fixed effects and `Site`, `Sex`, and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_hemo_ch_full <- lmer(Hemoglobin ~ Status_qPCR * RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_model, na.action = na.fail)
+```
+
+We use the dredge function to compare models:
+```{r, message=FALSE, warning=FALSE}
+model_dredge_hemo_ch <- dredge(lmer_hemo_ch_full)
+model_dredge_hemo_ch
+```
+
+Based on `model_dredge_hemo_ch`, the model with the minimal AICc value is `1 + (1|Site) + (1|Sex) + (1|Year)`.\
+To validate it as the best-fitted model, we compare it with all models having an AICc difference of 2 or less:
+```{r message=FALSE, warning=FALSE}
+lmer_hemo_ch_1 <- lmer(Hemoglobin ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_model, na.action = na.fail)
+lmer_hemo_ch_2 <- lmer(Hemoglobin ~ Status_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_model, na.action = na.fail)
+
+anova4 <- anova(lmer_hemo_ch_1, lmer_hemo_ch_2, test="Chisq")
+
+p_value_anova4 <- anova4$`Pr(>Chisq)`[2]
+
+anova_results_hemo_ch <- data.frame(
+  Comparison = c("null (best)",
+                 "best vs Status_qPCR"),
+  ANOVA_p_value = c("-", p_value_anova4),
+  AICc = c(AICc(lmer_hemo_ch_1), AICc(lmer_hemo_ch_2)))
+
+# Print the table with kable
+anova_results_hemo_ch %>%
+  kable(caption = "Results of comparison between best AICc model and other models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We can also compare them with `tab_model` function:
+```{r}
+tab_model(lmer_hemo_ch_1, lmer_hemo_ch_2, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, we select `1 + (1|Site) + (1|Sex) + (1|Year)` as the best-fitted model.
+```{r}
+shapiro.test(residuals(lmer_hemo_ch_1))
+```
+
+**Based on the measured variables, we did not identified a fixed effect influencing the circulating concentration of hemoglobin in chicks, including the presence of *Babesia*.**
+
+Visualisation: 
+```{r}
+plotC <- ggplot(data_hemo_ch_model, aes(x= Sex, y= Hemoglobin, color=Sex, fill=Sex))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Sex",
+       y = "Concentration of hemoglobin", 
+       title = "Hemoglobin in chicks according to sex and site") + 
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 9)) + 
+  facet_grid(~Site)
+
+plotD <- ggplot(data_hemo_ch_model, aes(x= Status_qPCR, y= Hemoglobin, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Infection status",
+       y = "Concentration of hemoglobin", 
+       title = "Hemoglobin in chicks according to sex, site, and infection status") + 
+  theme(axis.text.x = element_blank(),
+        plot.title = element_text(size = 9)) + 
+  facet_grid(Site~Sex)
+
+ggarrange(plotC, plotD, nrow = 1, ncol = 2)
+```
+
+
+## 2.2. Based on parasitemia (continuous)
+### 2.2.1. In adults
+To determine whether a Pearson Correlation test can be used, the data must be tested for normality, autocorrelation and homoscedasticity:
+```{r, message=FALSE, warning=FALSE}
+shapiro.test(data_hemo_ad_ratioBab$Hemoglobin)
+```
+**p-value > 0.05, the data is normally distributed.**\
+
+```{r, message=FALSE, warning=FALSE}
+bptest(aov(Hemoglobin ~ Ratio_qPCR, data = data_hemo_ad_ratioBab)) 
+```
+**p-value > 0.05, the null hypothesis of residual homoscedasticity cannot be rejected.**\
+
+```{r, message=FALSE, warning=FALSE}
+dwtest(aov(Hemoglobin ~ Ratio_qPCR, data = data_hemo_ad_ratioBab))
+```
+**p-value > 0.05, the null hypothesis that the residuals are not autocorrelated cannot be rejected.**\
+
+We can use a Pearson Correlation test: 
+```{r, message=FALSE, warning=FALSE}
+hemo_adults <- data_hemo_ad_ratioBab$Hemoglobin
+ratioqPCR_adults <- data_hemo_ad_ratioBab$Ratio_qPCR
+cor.test(hemo_adults,ratioqPCR_adults, method="pearson")
+```
+
+**p-value > 0.05 (p-value = 0.3821 & cor = 0.3107673), the null hypothesis that there is no correlation between the two variables `Hemoglobin` and `Ratio_qPCR` cannot be rejected.**\
+**The parasitemia doesn't influence the circulating concentration of hemoglobin in adults.**
+
+
+### 2.2.2. In chicks
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_hemo_ch_model <- data_hemo_chicks[!(is.na(data_hemo_chicks$Status_qPCR)), ]
+data_hemo_ch_model <- data_hemo_ch_model[!(is.na(data_hemo_ch_model$Sex)), ]
+data_hemo_ch_ratioBab <- data_hemo_ch_model[!(is.na(data_hemo_ch_model$Ratio_qPCR)), ]
+data_hemo_ch_ratioBab <- data_hemo_ch_ratioBab[!(is.na(data_hemo_ch_ratioBab$ErrorRatio_qPCR)), ]
+```
+
+We include the variables `Ratio_qPCR` and `RatioWT` as fixed effects and `Site`, `Sex`, and `Year` as random effects in our full LMER model. We will analyse `Ratio_qPCR` using a log-transformation:
+```{r, message=FALSE, warning=FALSE}
+data_hemo_ch_ratioBab$log_ratio_qPCR <- log10(data_hemo_ch_ratioBab$Ratio_qPCR)
+
+lmer_hemo_ch_ratio_full <- lmer(Hemoglobin ~ log_ratio_qPCR * RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_ratioBab, na.action = na.fail)
+```
+
+We use the dredge function to compare models:
+```{r, message=FALSE, warning=FALSE}
+model_dredge_hemo_ratio_ch <- dredge(lmer_hemo_ch_ratio_full)
+model_dredge_hemo_ratio_ch
+```
+
+Based on these results, the model with the lower AICc is `1 + (1|Site) + (1|Sex) + (1|Year)`.\
+To validate it, we will also compare it with the models with AICc difference of 2 and including a comparison between the null against `log_ratio_qPCR`:
+```{r, message=FALSE, warning=FALSE}
+lmer_hemo_ch_ratio_null <- lmer(Hemoglobin ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_ratioBab, na.action = na.fail)
+lmer_hemo_ch_ratio_1 <- lmer(Hemoglobin ~ RatioWT + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_ratioBab, na.action = na.fail)
+lmer_hemo_ch_ratio_2 <- lmer(Hemoglobin ~ log_ratio_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_hemo_ch_ratioBab, na.action = na.fail)
+
+anova(lmer_hemo_ch_ratio_null, lmer_hemo_ch_ratio_1, test="Chisq")
+anova(lmer_hemo_ch_ratio_null, lmer_hemo_ch_ratio_2, test="Chisq")
+```
+
+We examine the models (NB: DHARMA cannot be used on weighted LMER):
+```{r, message=FALSE, warning=FALSE}
+tab_model(lmer_hemo_ch_ratio_null, lmer_hemo_ch_ratio_1, lmer_hemo_ch_ratio_2, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results:\
+-The AICc of the `RatioWT` model is not the lowest but the ANOVA indicates an effect of the adding of `RatioWT`.\
+-The model with `log_ratio_qPCR` alone suggests a negative correlation with `Hemoglobin` but this correlation isn't significant. A further investigation and bigger dataset would help to study this correlation.\
+
+We choose the model `RatioWT + (1|Site) + (1|Sex) + (1|Year)` as the best-fitted model.\
+We examine the best-fitted model:
+```{r}
+summary(lmer_hemo_ch_ratio_1)
+plot(lmer_hemo_ch_ratio_1)
+qqnorm(resid(lmer_hemo_ch_ratio_1)); qqline(resid(lmer_hemo_ch_ratio_1))
+shapiro.test(residuals(lmer_hemo_ch_ratio_1))
+```
+
+**Conclusion:**\
+**The parasitemia might have an effect of concentration of hemoglobin in chicks with a bigger dataset but here there is no effect of the parasitemia on the concentration of hemoglobin.**\  
+
+Visualisation: 
+```{r,message=FALSE, warning=FALSE}
+plotE <- ggplot(data_hemo_ch_ratioBab, aes(x = RatioWT, y = Hemoglobin)) +
+  geom_point() +  
+   geom_smooth(method = lm) +  
+  labs(x = "Body condition",
+       y = "Concentration of hemoglobin", 
+       title = "Concentration of hemoglobin in chicks according to body condition") +  
+  theme(plot.title = element_text(size = 9))
+
+plotF <- ggplot(data_hemo_ch_ratioBab, aes(x = log_ratio_qPCR, y = Hemoglobin)) +
+  geom_point() +  
+  labs(x = "log10(RatioqPCR)",
+       y = "Concentration of hemoglobin", 
+       title = "Concentration of hemoglobin in chicks according to parasitemia") +  
+  theme(plot.title = element_text(size = 9))
+
+ggarrange(plotE, plotF, nrow = 1, ncol = 2)
+```
+
+
+# 3. Effects of infection on body condition
+## 3.1. Based on infectious status (binary: infected/uninfected) 
+### 3.1.1. In adults
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_ratiowt_ad_model <- data_ratiowt_adults[!(is.na(data_ratiowt_adults$Status_qPCR)), ]
+data_ratiowt_ad_model <- data_ratiowt_ad_model[!(is.na(data_ratiowt_ad_model$Sex)), ]
+```
+
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Sex`, and `Year` as random effects in our full LMER model: 
+```{r, message=FALSE, warning=FALSE}
+lmer_ratiowt_ad_full <- lmer(RatioWT ~ Status_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ad_model)
+```
+
+As the model is rather simple, we will directly use ANOVA and AICc comparison:
+```{r, message=FALSE, warning=FALSE}
+lmer_ratiowt_ad_null <- lmer(RatioWT ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ad_model)
+
+anova5 <- anova(lmer_ratiowt_ad_full, lmer_ratiowt_ad_null, test="Chisq")
+
+p_value_anova5 <- anova5$`Pr(>Chisq)`[2]
+
+anova_results_ratiowt_ad <- data.frame(
+  Comparison = c("Full",
+                 "Full vs null"),
+  ANOVA_p_value = c("-", p_value_anova5),
+  AICc = c(AICc(lmer_ratiowt_ad_full), AICc(lmer_ratiowt_ad_null)))
+
+# Print the table with kable
+anova_results_ratiowt_ad %>%
+  kable(caption = "Results of comparison between full and null models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We can also compare them with `tab_model` function:
+```{r, message=FALSE, warning=FALSE}
+tab_model(lmer_ratiowt_ad_full, lmer_ratiowt_ad_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, we select `1 + (1|Site) + (1|Sex) + (1|Year)` as the best-fitted model.
+```{r}
+shapiro.test(residuals(lmer_ratiowt_ad_null))
+```
+
+**Based on the measured variables, either without normal distribution of the residuals, we conclude that we did not identified a fixed effect influencing the body condition in adults, including the presence of *Babesia*.**\  
+
+Visualisation: 
+```{r}
+plotG <- ggplot(data_ratiowt_ad_model, aes(x= Sex, y= RatioWT))+
+  geom_point(aes(color=Year)) +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Sex",
+       y = "Ratio mass/tarsus (body condition)", 
+       title = "Body condition in adults according to sex, year and site")+ 
+  theme(plot.title = element_text(size = 9)) + 
+  facet_grid(~Site)
+
+plotH <- ggplot(data_ratiowt_ad_model, aes(x= Status_qPCR, y= RatioWT, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Infection status",
+       y = "Ratio mass/tarsus (body condition)", 
+       title = "Body condition in adults according to sex, site, and infection status")+ 
+  theme(plot.title = element_text(size = 9), 
+        axis.text.x = element_blank()) + 
+  facet_grid(Site~Sex)
+
+ggarrange(plotG, plotH, nrow = 1, ncol = 2)
+```
+
+### 3.1.2. In chicks
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_ratiowt_ch_model <- data_ratiowt_chicks[!(is.na(data_ratiowt_chicks$Status_qPCR)), ]
+data_ratiowt_ch_model <- data_ratiowt_ch_model[!(is.na(data_ratiowt_ch_model$Sex)), ]
+```
+
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Sex`, and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_ratiowt_ch_full <- lmer(log_ratiowt ~ Status_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ch_model)
+```
+
+As the model is rather simple, we will directly use ANOVA and AICc comparison:
+```{r, message=FALSE, warning=FALSE}
+lmer_ratiowt_ch_null <- lmer(log_ratiowt ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ch_model)
+
+anova6 <- anova(lmer_ratiowt_ch_full, lmer_ratiowt_ch_null, test="Chisq")
+
+p_value_anova6 <- anova6$`Pr(>Chisq)`[2]
+
+anova_results_ratiowt_ch <- data.frame(
+  Comparison = c("Full",
+                 "Full vs null"),
+  ANOVA_p_value = c("-", p_value_anova6),
+  AICc = c(AICc(lmer_ratiowt_ch_full), AICc(lmer_ratiowt_ch_null)))
+
+# Print the table with kable
+anova_results_ratiowt_ch %>%
+  kable(caption = "Results of comparison between full and null models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We can also compare them with `tab_model` function:
+```{r, message=FALSE, warning=FALSE}
+tab_model(lmer_ratiowt_ch_full, lmer_ratiowt_ch_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, we select `1 + (1|Site) + (1|Sex) + (1|Year)` as the best-fitted model.
+```{r}
+shapiro.test(residuals(lmer_ratiowt_ch_null))
+```
+
+**Based on the measured variables, we did not identified a fixed effect influencing the body condition in chucks, including the presence of *Babesia*.**\
+
+Visualisation: 
+```{r}
+plotI <- ggplot(data_ratiowt_ch_model, aes(x= Sex, y= RatioWT, color=Sex, fill=Sex))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Sex",
+       y = "Ratio mass/tarsus (body condition)", 
+       title = "Body condition in chicks according to sex and site")+ 
+  theme(plot.title = element_text(size = 9), 
+        axis.text.x = element_blank()) + 
+  facet_grid(~Site)
+
+plotJ <- ggplot(data_ratiowt_ch_model, aes(x= Status_qPCR, y= RatioWT, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+  labs(x = "Infection status",
+       y = "Ratio mass/tarsus (body condition)", 
+       title = "Body condition in chicks according to sex, site, and infection status")+ 
+  theme(plot.title = element_text(size = 9), 
+        axis.text.x = element_blank()) + 
+  facet_grid(Site~Sex)
+
+ggarrange(plotI, plotJ, nrow = 1, ncol = 2)
+```
+
+
+## 3.2. Based on parasitemia (continuous)
+### 3.2.1. In adults
+To determine whether a Pearson Correlation test can be used, the data must be tested for normality, autocorrelation and homoscedasticity:
+```{r, message=FALSE, warning=FALSE}
+shapiro.test(data_ratiowt_ad_ratioBab$RatioWT)
+```
+**p-value > 0.05, the data is normally distributed.**\
+
+```{r, message=FALSE, warning=FALSE}
+bptest(aov(RatioWT ~ Ratio_qPCR, data = data_ratiowt_ad_ratioBab)) 
+```
+**p-value > 0.05, the null hypothesis of residual homoscedasticity cannot be rejected.**\
+
+```{r, message=FALSE, warning=FALSE}
+dwtest(aov(RatioWT ~ Ratio_qPCR, data = data_ratiowt_ad_ratioBab))
+```
+**p-value > 0.05, the null hypothesis that the residuals are not autocorrelated cannot be rejected.**\
+
+We can use a Pearson Correlation test: 
+```{r, message=FALSE, warning=FALSE}
+ratiowt_adults <- data_ratiowt_ad_ratioBab$RatioWT
+ratioqPCR_adults <- data_ratiowt_ad_ratioBab$Ratio_qPCR
+cor.test(ratiowt_adults,ratioqPCR_adults, method="pearson")
+```
+
+**p-value > 0.05 (p-value = 0.2357 & cor = 0.4128869), the null hypothesis that there is no correlation between the two variables `RatioWT` and `Ratio_qPCR` cannot be rejected.**\
+**The parasitemia doesn't influence the body condition in adults.**
+
+
+### 3.2.2. In chicks
+We remove the missing values of variables that will be analysed in the model:
+```{r}
+data_ratiowt_ch_model <- data_ratiowt_chicks[!(is.na(data_ratiowt_chicks$Status_qPCR)), ]
+data_ratiowt_ch_model <- data_ratiowt_ch_model[!(is.na(data_ratiowt_ch_model$Sex)), ]
+data_ratiowt_ch_ratioBab <- data_ratiowt_ch_model[!(is.na(data_ratiowt_ch_model$Ratio_qPCR)), ]
+data_ratiowt_ch_ratioBab <- data_ratiowt_ch_ratioBab[!(is.na(data_ratiowt_ch_ratioBab$ErrorRatio_qPCR)), ]
+```
+
+We include the variables `Ratio_qPCR` as a fixed effect and `Site`, `Sex`, and `Year` as random effects in our full LMER model. We also wanted to include `ErrorRatio_qPCR` and so we used a weighted LMER:
+```{r, message=FALSE, warning=FALSE}
+data_ratiowt_ch_ratioBab$log_ratio_qPCR <- log10(data_ratiowt_ch_ratioBab$Ratio_qPCR)
+data_ratiowt_ch_ratioBab$weights <- 1 / data_ratiowt_ch_ratioBab$ErrorRatio_qPCR
+
+lmer_ratiowt_ch_ratio_full <- lmer(RatioWT ~ log_ratio_qPCR + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ch_ratioBab)
+```
+
+As the model is rather simple, we will directly use ANOVA and AICc comparison:
+```{r, message=FALSE, warning=FALSE}
+lmer_ratiowt_ch_ratio_null <- lmer(RatioWT ~ 1 + (1|Site) + (1|Sex) + (1|Year), data=data_ratiowt_ch_ratioBab)
+
+anova7 <- anova(lmer_ratiowt_ch_ratio_full, lmer_ratiowt_ch_ratio_null, test="Chisq")
+
+p_value_anova7 <- anova7$`Pr(>Chisq)`[2]
+
+anova_results_ratiowt_ratio_ch <- data.frame(
+  Comparison = c("Full",
+                 "Full vs null"),
+  ANOVA_p_value = c("-", p_value_anova7),
+  AICc = c(AICc(lmer_ratiowt_ch_ratio_full), AICc(lmer_ratiowt_ch_ratio_null)))
+
+# Print the table with kable
+anova_results_ratiowt_ratio_ch %>%
+  kable(caption = "Results of comparison between full and null models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+We can also compare them with `tab_model` function:
+```{r, message=FALSE, warning=FALSE}
+tab_model(lmer_ratiowt_ch_ratio_full, lmer_ratiowt_ch_ratio_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the model with the lower AICc is `1 + (1|Site) + (1|Sex) + (1|Year)`.
+```{r}
+shapiro.test(residuals(lmer_ratiowt_ch_ratio_null))
+```
+
+**Based on the measured variables, we did not identified a fixed effect influencing the body condition in chucks, including the parasitemia.**\
+
+Visualisation: 
+```{r,message=FALSE, warning=FALSE}
+ggplot(data_ratiowt_ch_ratioBab, aes(x = log_ratio_qPCR, y = RatioWT)) +
+  geom_point() +  
+  labs(x = "log10(Ratio_qPCR)",
+       y = "Body condition", 
+       title = "Body condition in chicks according to parasitemia") +  
+  theme(plot.title = element_text(size = 12)) 
+```
+
+
+# 4. Summary
+## 4.1. Circulating Hemoglobin Concentration
+In adults, *Babesia* infection status does not affect hemoglobin concentration (LMER best-fitted model: `RatioWT + (1|Site) + (1|Sex) + (1|Year)`), nor does parasitemia (Pearson correlation, p = 0.3821).\ 
+
+In chicks, *Babesia* infection status does not affect hemoglobin concentration (LMER best-fitted model: `1 + (1|Site) + (1|Sex) + (1|Year)`). The parasitemia tend to have an effect of concentration of hemoglobin in chicks, but the nature of this relationship is difficult to assess with our current data.
+
+## 4.2. Body Condition
+In adults, *Babesia* infection status does not affect body condition (LMER best-fitted model: `1 + (1|Site) + (1|Sex) + (1|Year)`), nor does parasitemia (Pearson correlation, p = 0.2357).\ 
+
+In chicks, *Babesia* infection status does not affect body condition (LMER best-fitted model: `1 + (1|Site) + (1|Sex) + (1|Year)`), nor does the parasitemia.

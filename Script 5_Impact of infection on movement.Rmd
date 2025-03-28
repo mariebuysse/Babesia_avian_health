@@ -1,0 +1,1027 @@
+---
+title: "Script 5 - Impact of infection on movement"
+subtitle: "Blood parasites and avian health"
+author: "Marie Buysse, Mathilde Ollagnier, Charly Souc, Marjorie Bruley, Thomas Blanchon, Carole Leray, Marion Vittecoq and Karen D. McCoy"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0.Librairies
+```{r, message=FALSE, warning=FALSE}
+library(readxl) #read_excel function
+library(ggplot2)
+library(dplyr)
+library(kableExtra) #kable function
+library(ggpubr) #ggarrange function
+library(lme4) #lmer function
+library(sjPlot) #tab_model function
+library(DHARMa) #simulateResiduals function
+library(MuMIn) #AICc function
+library(car) #leveneTest function
+library(coin) #oneway_test and wilcox_test functions
+library(mgcv) #gam function
+library(fitdistrplus) #fitdist function
+library(emmeans) #emmeans function
+library(dplyr) #group_by and group_split functions
+library(sf) #SF object manipulation
+library(trajr)#TrajFromCoords and TrajLength functions
+library(lubridate)#date manipulation
+```
+
+**Information about data visualisation:**\
+For a same variable, one data visualisation is based on fixed effect selected in the best-fitted model and most significant random effects. Another visualisation include the infection status or parasitemia, whether significant or not.
+
+# 1. Infection status influence on fledging and migration
+## 1.1. Dataset
+```{r}
+data_Fledg_Mig <- read_excel("Data_Impact of infection on movement_fledging_migration.xlsx")
+data_Fledg_Mig$Sample <- as.factor(data_Fledg_Mig$Sample)
+data_Fledg_Mig$Site <- as.factor(data_Fledg_Mig$Site)
+data_Fledg_Mig$Year <- as.factor(data_Fledg_Mig$Year)
+data_Fledg_Mig$Sex <- as.factor(data_Fledg_Mig$Sex)
+data_Fledg_Mig$Status_qPCR <- as.factor(data_Fledg_Mig$Status_qPCR)
+data_Fledg_Mig$Fledging_day <- as.numeric(data_Fledg_Mig$Fledging_day)
+data_Fledg_Mig$Migration_day <- as.numeric(data_Fledg_Mig$Migration_day)
+data_Fledg_Mig$Migration <- as.numeric(data_Fledg_Mig$Migration)
+data_Fledg_Mig$Avg_distance_km <- as.numeric(data_Fledg_Mig$Avg_distance_km)
+```
+With:\
+-Sample: ID of individual bird\
+-Site: sampling colony (Carteau/Frioul)\
+-Year: sampling year (2022/2023/2024)\
+-Sex: sex of bird (F/M)\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-Fledging_day: age of fledging (in days)\
+-Migration_day: age of departure on migration (in days)\
+-Migration: migration strategy (1: migratory or 0: non-migratory)\
+-Avg_distance_km: average daily flight distance between fledging and September 1st (in kilometers)\
+
+
+## 1.2. Infection status influence on fledging age
+Individuals for whom `Fledging_day` hasn't been determined are removed:
+```{r}
+data_Fledg_age <- data_Fledg_Mig %>%
+  filter(!is.na(Fledging_day))
+```
+
+### 1.2.1. Data distribution
+```{r, message=FALSE, warning=FALSE}
+g <- ggplot(data_Fledg_age, aes(x=Fledging_day)) + geom_histogram()
+h <- ggplot(data_Fledg_age, aes(x=Fledging_day, fill=Status_qPCR)) + geom_histogram()
+ggarrange(g,h, ncol=1, nrow=2)
+```
+
+```{r}
+shap1 <- shapiro.test(data_Fledg_age$Fledging_day)
+shap2 <- shapiro.test(data_Fledg_age$Fledging_day[data_Fledg_age$Status_qPCR == "infected"])
+shap3 <- shapiro.test(data_Fledg_age$Fledging_day[data_Fledg_age$Status_qPCR == "uninfected"])
+
+shapiro_test_results <- data.frame(
+  Shapiro_test = c("Fledging_day", "Fledging_day - infected", "Fledging_day - uninfected"),
+  p_value = c(shap1$p.value, shap2$p.value, shap3$p.value))
+
+shapiro_test_results %>%
+  kable(caption = "Shapiro results of Fledging_day") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+**All p-value > 0.05**\
+
+```{r}
+leveneTest(data_Fledg_age$Fledging_day ~ data_Fledg_age$Status_qPCR)
+```
+
+**p-value > 0.05**\
+Variances are egal and `data_Fledg_age$Fledging_day` is normally distributed. **We will use parametric tests and LMER models (while testing the distribution of model residuals).**\
+
+### 1.2.2. Two Sample t-test
+```{r}
+t.test(data_Fledg_age$Fledging_day ~ data_Fledg_age$Status_qPCR, var.equal = TRUE)
+```
+**p = 0.8766 > 0.05**\
+**There is no difference in mean days of fledging between infection status**. The average number of days for infected birds is 67.80 days and for non-infected birds it is 68.35 days.\
+
+Some metrics:
+```{r}
+summary_fled_age <- data_Fledg_age %>%
+  group_by(Status_qPCR) %>%
+  summarise(
+    mean = mean(Fledging_day, na.rm = TRUE),
+    SD = sd(Fledging_day),
+    SE = sd(Fledging_day, na.rm = TRUE) / sqrt(length(Fledging_day)),
+    n = length(Fledging_day)
+    )
+kable(summary_fled_age, align="lccc")
+```
+
+
+### 1.2.3. Model LMER
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Year` and `Sex` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_full_fled_age <- lmer(Fledging_day ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sex), data=data_Fledg_age)
+lmer_null_fled_age <- lmer(Fledging_day ~ 1 + (1|Site) + (1|Year) + (1|Sex), data=data_Fledg_age)
+AICc(lmer_full_fled_age)
+AICc(lmer_null_fled_age)
+anova(lmer_full_fled_age, lmer_null_fled_age, test="Chisq")
+tab_model(lmer_full_fled_age, lmer_null_fled_age, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, **`Status_qPCR` is not a fixed effect influencing the fledging age.**\
+
+```{r}
+residuals_lmer_fled <- residuals(lmer_null_fled_age)
+hist(residuals_lmer_fled)
+shapiro.test(residuals(lmer_null_fled_age))
+```
+
+Visualisation:
+```{r}
+data_Fledg_age <- data_Fledg_age %>%
+  filter(!is.na(Sex))
+
+plotA <- ggplot(data_Fledg_age, aes(x = Sex, y = Fledging_day, fill = Sex, col= Sex)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Fledging age",
+       x = "Infection status",
+       title = "Fledging age according to sex and year") + 
+  theme(plot.title = element_text(size = 9),
+    legend.position = "none"
+  ) + 
+  facet_grid(~Year)
+
+plotB <- ggplot(data_Fledg_age, aes(x = Status_qPCR, y = Fledging_day, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Fledging age",
+       x = "Infection status",
+       title = "Fledging age according to infection status, sex and year") + 
+  theme(plot.title = element_text(size = 9),
+    legend.position = "none"
+  ) + 
+  facet_grid(Sex~Year)
+
+ggarrange(plotA, plotB, ncol=2, nrow=1)
+```
+
+
+## 1.3. Infection status influence on the overall migration strategy (migratory or non-migratory)
+Individuals for whom `Fledging_day` hasn't been determined are removed:
+```{r}
+data_Migr <- data_Fledg_Mig %>%
+  filter(!is.na(Migration))
+```
+
+### 1.3.1. Fisher’s test
+```{r}
+tabCont_migration <- table(data_Migr$Migration, data_Migr$Status_qPCR)
+tabCont_migration_marg <- addmargins(tabCont_migration)
+print(tabCont_migration_marg)
+fisher.test(tabCont_migration, simulate.p.value = TRUE, B = 10000)
+```
+
+**p-value = 1**\
+**We therefore consider that the proportions are not significantly different based on the infection status**.\
+
+### 1.3.2. Model GLMER
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Year` and `Sex` as random effects in our full GLMER model (binomial family):
+```{r, message=FALSE, warning=FALSE}
+glmer_full_migr <- glmer(Migration ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sex), family=binomial(link = "logit"), data=data_Migr)
+glmer_null_migr <- glmer(Migration ~ 1 + (1|Site) + (1|Year) + (1|Sex), family=binomial(link = "logit"), data=data_Migr)
+AICc(glmer_full_migr)
+AICc(glmer_null_migr)
+anova(glmer_full_migr, glmer_null_migr, test="Chisq")
+tab_model(glmer_full_migr, glmer_null_migr, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, **`Status_qPCR` is not a fixed effect influencing the overall migration strategy.**\
+
+Visualisation:
+```{r}
+plotC <- ggplot(data_Migr, aes(x = Site, fill = factor(Migration))) +
+  geom_bar(position = "fill") +  
+  labs(y = "Overall migration strategy",
+       x = "Infection status",
+       title = "Overall migration strategy according to site", 
+       fill = "Migration") + 
+  theme(plot.title = element_text(size = 9)) 
+
+plotD <- ggplot(data_Migr, aes(x = Status_qPCR, fill = factor(Migration))) +
+  geom_bar(position = "fill") +  
+  labs(y = "Overall migration strategy",
+       x = "Infection status",
+       title = "Overall migration strategy according to infection status and site", 
+       fill = "Migration") + 
+  theme(plot.title = element_text(size = 9), 
+        legend.position = "none") + 
+  facet_grid(~Site)
+
+ggarrange(plotC, plotD, ncol=2, nrow=1)
+```
+
+
+## 1.4. Infection status influence on age of departure on migration (for individuals that migrated)
+Individuals for whom `Migration_day` hasn't been determined are removed:
+```{r}
+data_Migr_age <- data_Fledg_Mig %>%
+  filter(!is.na(Migration_day))
+```
+
+### 1.4.1. Data distribution
+```{r, message=FALSE, warning=FALSE}
+g <- ggplot(data_Migr_age, aes(x=Migration_day)) + geom_histogram()
+h <- ggplot(data_Migr_age, aes(x=Migration_day, fill=Status_qPCR)) + geom_histogram()
+ggarrange(g,h, ncol=1, nrow=2)
+```
+
+```{r}
+shap4 <- shapiro.test(data_Migr_age$Migration_day)
+shap5 <- shapiro.test(data_Migr_age$Migration_day[data_Migr_age$Status_qPCR == "infected"])
+shap6 <- shapiro.test(data_Migr_age$Migration_day[data_Migr_age$Status_qPCR == "uninfected"])
+
+shapiro_test_results <- data.frame(
+  Shapiro_test = c("Migration_day", "Migration_day - infected", "Migration_day - uninfected"),
+  p_value = c(shap4$p.value, shap5$p.value, shap6$p.value))
+
+shapiro_test_results %>%
+  kable(caption = "Shapiro results of Migration_day") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+**p-value of Migration_day < 0.05**\
+
+```{r}
+leveneTest(data_Migr_age$Migration_day ~ data_Migr_age$Status_qPCR)
+```
+
+**p-value > 0.05**\
+Variances are egal but `data_Migr_age$Migration_day` is not normally distributed. **We will use non-parametric tests but LMER models for which we will test the distribution of model residuals.**\
+
+### 1.4.2. Wilcoxon rank-sum test and permutation-based one-way test
+```{r, message=FALSE, warning=FALSE}
+wilcox.test(Migration_day ~ Status_qPCR, data = data_Migr_age, exact = TRUE)
+```
+
+**p-value = 1**\
+We will use permutation-based tests to obtain an exact p-value.\
+
+```{r}
+wilcox_test(Migration_day ~ Status_qPCR, data = data_Migr_age, distribution = "exact")
+oneway_test(Migration_day ~ Status_qPCR, data = data_Migr_age, distribution = "exact")
+```
+
+**p-value = 0.9809 and 0.9027**\
+**There is no difference in mean of the age of the departure on migration**.\
+
+### 1.4.3. Model LMER
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Year` and `Sex` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_full_migr_age <- lmer(Migration_day ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sex), data=data_Migr_age)
+lmer_null_migr_age <- lmer(Migration_day ~ 1 + (1|Site) + (1|Year) + (1|Sex), data=data_Migr_age)
+AICc(lmer_full_migr_age)
+AICc(lmer_null_migr_age)
+anova(lmer_full_migr_age, lmer_null_migr_age, test="Chisq")
+tab_model(lmer_full_migr_age, lmer_null_migr_age, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, **`Status_qPCR` is not a fixed effect influencing the age of departure on migration.**\
+
+```{r}
+residuals_lmer_migr <- residuals(lmer_null_migr_age)
+hist(residuals_lmer_migr)
+shapiro.test(residuals(lmer_null_migr_age))
+```
+
+We are not far of p-value > 0.05 (0.009) and based on the results of Wilcoxon rank-sum test and permutation-based one-way test, we will consider that the models allow us to conclude that **the age of departure on migration is not influenced by the infection status**.\
+
+Visualisation:
+```{r}
+plotE <- ggplot(data_Migr_age, aes(x = Sex, y = Migration_day, fill = Sex, col= Sex)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Age of departure on migration",
+       x = "Infection status",
+       title = "Age of departure on migration according to sex and year") + 
+  theme(plot.title = element_text(size = 9),
+    legend.position = "none"
+  ) + 
+  facet_grid(~Year)
+
+plotF <- ggplot(data_Migr_age, aes(x = Status_qPCR, y = Migration_day, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Age of departure on migration",
+       x = "Infection status",
+       title = "Age of departure on migration according to infection status, sex and year") + 
+  theme(plot.title = element_text(size = 9),
+    legend.position = "none"
+  ) + 
+  facet_grid(Year~Sex)
+
+ggarrange(plotE, plotF, ncol=2, nrow=1)
+```
+
+
+# 2. Infection status influence on daily flight distances between fledging and September 1st 
+## 2.0. Calculation of `Day_distance_km` and `Avg_distance_km`
+**Important**\
+The dataset about the GPS location (`data_movement.csv`) is not shared in the GitHub repository. Nevertheless, access can be granted upon request via Movebank for relevant inquiries (Project ID: Yellow-Legged Gull - France - Espagne -ID_PROG 990).
+
+```
+data_movement <- read.csv("data_movement.csv", header = TRUE) #GPS positions of all tagged juveniles yellow-legged gull who have been included in the paper study from the day their GPS tag was deployed until the 1st of September).
+data_movement$timestamp <- as.POSIXct(data_movement$timestamp, format = "%Y-%m-%d %H:%M:%S", tz = "UTC")
+data_movement <- data_movement %>% mutate_at(vars(date, Hatching.date.estimate, date.de.fin), ~ as.POSIXct(., format = "%Y-%m-%d", tz = "UTC"))
+
+#spatial files 
+buffer_carteau <- st_read("buffer_carteau200m.shp") %>% st_transform(4326) #Polygon of Carteau colony with a 200m buffer zone
+buffer_frioul <- st_read("buffer_frioul200m.shp") %>% st_transform(4326)# Polygon of the studied part of Frioul colony with a 200m buffer zone
+buffer_medit <- st_read("buffer_medit_80km.shp") %>% st_transform(4326)# Mediterranean Sea and a 80 km surrounding zone
+
+#information about the individuals
+data_ind <- read.csv2("gps_babesie.csv", header = TRUE)
+```
+
+`data_movement` includes the GPS positions of the individuals and associated information, with:\
+-Site: sampling colony (Carteau/Frioul)\
+-individual.local.identifier: ID of individual bird\
+-location.long: longitude coordinates\
+-location.lat: latitude coordinates\
+-timestamp: time in "YYYY-MM-DD HH:MM:SS" format\ 
+
+`data_ind` includes the information about each individual, with:\
+-Site: sampling colony (Carteau/Frioul)\
+-Bague.Darvic: ID of individual bird\
+-Year: sampling year (2022/2023/2024)\
+-date.de.fin: date on wich the tag stopped transmitting\
+-cause: cause of the transmission stoppage (mort/mort possible/perte de transmission) mort = dead, mort possible = loss of transmission with suspected death, perte de transmission = lost signal\
+-hatching.date.estimate: Estimated hatching date\  
+
+The following information are included but are not significant to the following command lines:\
+-Nid: number of the Nest\
+-date: Date of tag deployment\
+-masse : Mass of the individual in grams\
+-Sexe: sex of bird (F/M)\
+-Statut: infection status (infected/uninfected/NA)\
+-days: number of days since hatching\
+-Tag.mass:Tag mass in grams (including the attachment system)\
+-Tag.mass.percentage: Percentage of the tag's mass relative to the total mass of the bird in %\
+
+### 2.0.1. Each position is associated with a buffer (colony, medit or migrant)
+```
+#conversion of data_movement to an SF object
+movement_sf <- st_as_sf(data_movement, coords = c("location.long", "location.lat"), crs = 4326)
+
+#create a column with True/False depending on whether the individual is inside or outside of the three buffers.
+movement_sf$insidecarteau <- st_within(movement_sf, buffer_carteau, sparse = FALSE) %>% apply(1, any)
+movement_sf$insidefrioul <- st_within(movement_sf, buffer_frioul, sparse = FALSE) %>% apply(1, any)
+movement_sf$insidemedit <- st_within(movement_sf, buffer_medit, sparse = FALSE) %>% apply(1, any)
+
+#add the column
+movement_sf$loc <- NA
+#if TRUE for insidecarteau, the individuals from Carteau can have the value "colony" in this column
+movement_sf$loc[movement_sf$insidecarteau & movement_sf$Site == "Carteau"] <- "colony"
+#if TRUE for insidefrioul, the individuals from Frioul can have the value "colony" in this column
+movement_sf$loc[movement_sf$insidefrioul & movement_sf$Site == "Frioul"] <- "colony"
+#If TRUE for insidemedit and the column loc does not contain "colony", then the rows can have the value "medit" in this column.
+movement_sf$loc[movement_sf$insidemedit & is.na(movement_sf$loc)] <- "medit"
+#If insidemedit is FALSE, then the rows can have the value "migrant" in this column.
+movement_sf$loc[!movement_sf$insidemedit] <- "migrant"
+```
+
+### 2.0.2. Compute the days of fledging
+```
+#reconversion into a data.frame
+data_movementv2 <- movement_sf %>% cbind(st_coordinates(.)) %>% as.data.frame() 
+
+#Computate the fledging day (ie: 10 succesive location outside the 200m buffer zone during 1h30 minimum)
+result <- data_movementv2 %>%
+  arrange(individual.local.identifier, timestamp) %>%  # arrange by individual & timestamp
+  group_by(individual.local.identifier) %>%           # Groups by individuals
+  mutate(
+    # Identify the mediteranean position  ("medit") = outside the colony
+    is_medit = loc == "medit",  # label
+    sequence_id = cumsum(!is_medit)  # Number the Mediterranean sequence
+  ) %>%  filter(is_medit) %>%  # Keep only the mediteranean location (outside the colony)
+  group_by(individual.local.identifier, sequence_id) %>%  # Groups by sequence
+  summarise(
+    sequence_length = n(),  # Number of position during the sequence
+    start_time = min(timestamp),  # First timestamp of the sequence
+    end_time = max(timestamp),  # Last time stamp of the sequence
+    total_duration = as.numeric(difftime(max(timestamp), min(timestamp), units = "secs")),  #computate the total duration of each sequence
+    .groups = "drop"
+  ) %>%
+  filter(sequence_length >= 10 & total_duration >= 5400) %>%  #Keep only series with at least 10 positions and 5400 seconds (1h30)
+  group_by(individual.local.identifier) %>% 
+  summarise(
+    first_medit_date = min(start_time),  # Keep the first date of a valid sequence (= date of fledging)
+    .groups = "drop"
+  )
+result <- result %>% mutate(day_medit = format(first_medit_date, "%d-%m"))  # Extract the day & the month of the date
+result <- result %>% mutate(day_medit = as.POSIXct(format(first_medit_date, "1970-%m-%d"), format = "%Y-%m-%d",))
+
+#add the fledging date in the data file
+# Conversion of day_medit into "day/month" to had the same format
+result <- result %>%
+  mutate(day_medit_formatted = format(day_medit, "%d/%m"))
+# add in the data file
+data_ind <- data_ind %>%
+  left_join(result %>% select(individual.local.identifier, day_medit_formatted),
+            by = c("Bague.darvic" = "individual.local.identifier")) %>%
+  mutate( date_envol = ifelse(is.na(date_envol), day_medit_formatted, date_envol)) %>% select(-day_medit_formatted)
+```
+
+### 2.0.3. Compute the migration date
+```
+migration_dates <- data_movementv2 %>%
+  filter(loc == "migrant") %>%  # Filter only the location considered outside the mediteranean area, location as "migrant"
+  group_by(individual.local.identifier) %>%  # Group by individuals
+  summarise(
+    first_migration_date = min(timestamp),  # Find the first date as location "migrant"
+    .groups = "drop"
+  )
+
+migration_dates <- migration_dates %>% mutate(day_medit = format(first_migration_date, "%d-%m"))  # Extract the day & the month
+migration_dates <- migration_dates %>% mutate(day_medit = as.POSIXct(format(first_migration_date, "1970-%m-%d"), format = "%Y-%m-%d",))
+
+#add the migration date in the data file
+# add the in a "day/month" format
+migration_dates <- migration_dates %>%
+  mutate(day_medit_formatted = format(day_medit, "%d/%m"))
+# add in the data file
+data_ind <- data_ind %>%
+  left_join(migration_dates %>% select(individual.local.identifier, day_medit_formatted),
+            by = c("Bague.darvic" = "individual.local.identifier")) %>%
+  mutate(date.migration = ifelse(is.na(date.migration), day_medit_formatted, date.migration)) %>% select(-day_medit_formatted)
+```
+
+### 2.0.4. Mortality
+```
+#add the death date 
+data_ind <- data_ind %>%
+  mutate(
+    # Conversion of the column "date.de.fin" in date format
+    date.de.fin_parsed = as.Date(date.de.fin, format = "%d/%m/%Y"),
+    # Create a limit date (1st september)
+    date_limite = as.Date(paste0(Year, "-09-01")),
+    #update death_date if all the conditions are here ("mort" as cause, and death_date are before the limit date)
+    date_mort = ifelse(
+      cause == "mort" & !is.na(date.de.fin_parsed) & date.de.fin_parsed < date_limite,
+      format(date.de.fin_parsed, "%d/%m"),date_mort)) %>% select(-date.de.fin_parsed, -date_limite)
+
+#Add the information if the birds has been dead or not:
+data_ind <- data_ind %>%
+  mutate(vivant = case_when(
+      # If death date is not in NA, the birds is dead
+      !is.na(date_mort) ~ FALSE,
+      # If cause are "perte de transmission" (=lost signal) but date.de.fin (=end date) is after the limit date, the bird is alive
+      (cause == "perte de transmission"|cause =="mort possible") & as.Date(date.de.fin, format = "%d/%m/%Y") > as.Date(paste(Year, "09", "01", sep = "-")) ~TRUE, is.na(date_mort) & cause != "perte de transmission" ~ TRUE,TRUE ~ NA))
+```
+
+### 2.0.5. Put the information about if the bird is migratory or not
+```
+#migratory or not
+data_ind <- data_ind %>%
+  mutate(migration = case_when(
+      # If there is a migration date, migration = TRUE
+      !is.na(date.migration) ~ TRUE,
+      # If "vivant" (=alive) is TRUE and there is a NA in the migration date, migration = FALSE
+      vivant == TRUE & is.na(date.migration) ~ FALSE, TRUE ~ NA))
+```
+
+### 2.0.6. Computate the daily metrics of individuals (distance, location & number of position)
+```
+#create a column with the date at a precision of the day
+movement_sf <- movement_sf %>% mutate(day = as.Date(timestamp))
+
+#change the project's projection to be able to calculate in cartesian distance
+movement_sf <- st_transform(movement_sf, crs = 32633)
+
+#here, we create a data frame with one row per individual per day to calculate the distance traveled by each individual per day and the location of their furthest position from their colony (priority: migrant > medit > colony)
+daily_distances <- movement_sf %>%
+  group_by(individual.local.identifier, day) %>%
+  # check if there is more than 1 positions per days
+  filter(n() > 1) %>%
+  do({
+    # create a trajectory for each group (=each individual for each day)
+    traj <- TrajFromCoords(data.frame(st_coordinates(.)[, 1], st_coordinates(.)[, 2]))
+    # calculate the total distance in meters.
+    distance_m <- TrajLength(traj)
+    # number of position per day
+    num_positions <- nrow(.)  # number of line for each group
+    # do a priority rules for "loc"
+    loc_priority <- case_when(
+      "migrant" %in% .[['loc']] ~ "migrant",  # If "migrant", we keep "migrant"
+      "medit" %in% .[['loc']] ~ "medit",      # Otherwise, if "medit" is present, keep "medit"
+      TRUE ~ "colony"                         # Otherwise, we keep "colony"
+    )
+    # return the distance for this group as a data frame
+    data.frame(total_distance_m = distance_m,
+               num_positions = num_positions,  # number of position
+               loc = loc_priority)  # values of the "loc" with the priority rule
+  }) %>%
+  ungroup() %>%
+  # convert the distance from meters to kilometers
+  mutate(total_distance_km = total_distance_m / 1000)
+```
+
+### 2.0.7. Clean the dataset
+```
+#Add NA for the 36J:C individuals for the column "vivant" and "migration" (this birds have lost the transmission or are dead before the 1st september, so we can't define if he is dead or not)
+data_ind_cleaned <- data_ind %>%
+  mutate(vivant = if_else(Bague.darvic == "36J:C", NA, vivant),
+    migration = if_else(Bague.darvic == "36J:C", NA, migration))
+
+#Transform all the date into a full format
+data_ind_cleaned <- data_ind_cleaned %>%
+  mutate(
+    date_envol = format(as.Date(paste0(date_envol, "/", Year), format = "%d/%m/%Y"), "%d/%m"),
+    date.migration = format(as.Date(paste0(date.migration, "/", Year), format = "%d/%m/%Y"), "%d/%m"),
+    date.de.fin = format(as.Date(ifelse(!is.na(date.de.fin), paste0(date.de.fin, "/", Year), NA), format = "%d/%m/%Y"), "%d/%m")
+  )
+```
+
+### 2.0.8. Calculate the daily average distance for each individuals beetween the fledging date and the 1st september
+```
+daily_distances_avg <- daily_distances %>% 
+  inner_join(data_ind_cleaned, by = c("individual.local.identifier" = "Bague.darvic")) %>%
+  mutate(
+    # Conversion of date_envol in date with year
+    date_envol = as.Date(paste(date_envol, Year), format = "%d/%m %Y")
+  ) %>%
+  filter(day >= date_envol & day <= as.Date(paste(year(date_envol), "09", "01", sep = "-"))) %>%
+  group_by(individual.local.identifier) %>%
+  summarise(
+    avg_distance_km = mean(total_distance_km, na.rm = TRUE),
+    .groups = "drop")
+
+#we add the information in the final file
+data_ind_cleaned_with_avg <- data_ind_cleaned %>%
+  left_join(daily_distances_avg, by = c("Bague.darvic" = "individual.local.identifier"))
+```
+
+### 2.0.9. Create the file with the average daily distance metrics and other information per individuals (data_indv2)
+```
+#change some format date
+data_ind_cleaned_with_avg <- data_ind_cleaned_with_avg %>%
+  mutate(eclosion = format(as.Date(Hatching.date.estimate, format = "%d/%m/%Y"), "%d-%m"),
+      date_envol_complet = ifelse(!is.na(date_envol),paste(date_envol, Year),NA),
+      date_migration_complet = ifelse(!is.na(date.migration),paste(date.migration, Year),NA),
+      date_envol_complet = as.Date(date_envol_complet, format = "%d/%m %Y"),
+    date_migration_complet = as.Date(date_migration_complet, format = "%d/%m %Y"),
+    Hatching.date.estimate = as.POSIXct(Hatching.date.estimate, format = "%d/%m/%Y", tz = "UTC"),
+    jours_envol = as.numeric(difftime(date_envol_complet, Hatching.date.estimate, units = "days")),
+    jours_migration = as.numeric(difftime(date_migration_complet, Hatching.date.estimate, units = "days")))
+      
+
+Data_indv2 <- data_ind_cleaned_with_avg
+```
+
+
+### 2.0.10. Filter the daily_distance files to only include the days of individuals already considered to have fledged and create a file (borned_daily_distances).
+```
+#fledging date taking in account with the good format
+Data_indv2$date_envol_complet <- as.Date(Data_indv2$date_envol_complet, format = "%Y-%m-%d")
+
+borned_daily_distances <- do.call(rbind, lapply(1:nrow(Data_indv2), function(i) {
+  # retrieve the values for the current individual
+  identifier <- Data_indv2$Bague.darvic[i]
+  start_date <- Data_indv2$date_envol_complet[i]
+  # filter the rows of daily_distances corresponding to the individual and dates after the fledging date.
+  daily_distances[daily_distances$individual.local.identifier == identifier &
+                    as.POSIXct(daily_distances$day) >= as.POSIXct(start_date), ]
+}))
+```
+
+## 2.1. Datasets
+We will use data from `data_Fledg_Mig` and `data_distance_day`:
+```{r}
+data_distance_day <- read_excel("Data_Impact of infection on movement_distance_daily.xlsx")
+data_distance_day$Sample <- as.factor(data_distance_day$Sample)
+data_distance_day$Site <- as.factor(data_distance_day$Site)
+data_distance_day$Year <- as.factor(data_distance_day$Year)
+data_distance_day$Sex <- as.factor(data_distance_day$Sex)
+data_distance_day$Status_qPCR <- as.factor(data_distance_day$Status_qPCR)
+data_distance_day$Location <- as.factor(data_distance_day$Location)
+data_distance_day$Day_distance_km <- as.numeric(data_distance_day$Day_distance_km)
+```
+With:\
+-Sample: ID of individual bird\
+-Site: sampling colony (Carteau/Frioul)\
+-Year: sampling year (2022/2023/2024)\
+-Sex: sex of bird (F/M)\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-Location: the farthest geographical state from the natal colony within 24 hours according to section 2.0.3. (migrant/medit/colony)\
+-Day_distance_km: distance in kilometers between all positions of the individual over 24 hours according to section 2.0.3.\ 
+
+Visualisation:
+```{r}
+data_distance_avg <- data_Fledg_Mig %>% 
+  filter(!is.na(Avg_distance_km)) %>%
+  filter(!is.na(Sex)) %>%
+  filter(!is.na(Migration))
+data_distance_avg$Migration <- as.factor(data_distance_avg$Migration)
+
+data_distance_day <- data_distance_day %>% 
+  filter(!is.na(Sex))
+
+plotG <- ggplot(data_distance_avg, aes(x = Status_qPCR, y = Avg_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotH <- ggplot(data_distance_day, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotI <- ggplot(data_distance_avg, aes(x = Status_qPCR, y = Avg_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(~Sex)
+
+plotJ <- ggplot(data_distance_day, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(Sex~Location)
+```
+
+We create new separate datasets for migrant birds (`Location = migrant`) and sedentary birds (`Location = medit`), then calculate the updated value of `Avg_distance_km`: 
+```{r}
+split_data <- data_distance_day %>% group_by(Location) %>% group_split()
+names(split_data) <- c("colony", "medit", "migrant")
+data_distance_day_migr <- split_data[["migrant"]]
+data_distance_day_sed <- split_data[["medit"]]
+```
+
+We calculate the new values of `Avg_distance_km` based on the `Location` and add it to the `data_Fledg_Mig` dataset:
+```{r}
+avg_distance_migr <- data_distance_day_migr %>%
+  group_by(Sample) %>%
+  summarise(Avg_distance_km_migr = mean(Day_distance_km, na.rm = TRUE))
+
+avg_distance_sed <- data_distance_day_sed %>%
+  group_by(Sample) %>%
+  summarise(Avg_distance_km_sed = mean(Day_distance_km, na.rm = TRUE))
+
+data_Fledg_Mig_migr <- left_join(data_Fledg_Mig, avg_distance_migr, by = "Sample")
+data_Fledg_Mig_sed <- left_join(data_Fledg_Mig, avg_distance_sed, by = "Sample")
+```
+
+Visual comparison between with all birds and with only migrant ones and only sedentary ones:\
+**All strategies:**
+```{r}
+ggarrange(plotG, plotH, plotI, plotJ, ncol=2, nrow=2)
+```
+
+**Migrants:**
+```{r, include=FALSE}
+data_distance_avg_migr <- data_Fledg_Mig_migr %>% 
+  filter(!is.na(Avg_distance_km_migr)) %>%
+  filter(!is.na(Sex))
+
+data_distance_day_migr <- data_distance_day_migr %>% 
+  filter(!is.na(Sex))
+
+plotK <- ggplot(data_distance_avg_migr, aes(x = Status_qPCR, y = Avg_distance_km_migr, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotL <- ggplot(data_distance_day_migr, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotM <- ggplot(data_distance_avg_migr, aes(x = Status_qPCR, y = Avg_distance_km_migr, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(~Sex)
+
+plotN <- ggplot(data_distance_day_migr, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(~Sex)
+```
+```{r}
+ggarrange(plotK, plotL, plotM, plotN, ncol=2, nrow=2)
+```
+
+**Sedentary:**
+```{r, include=FALSE}
+data_distance_avg_sed <- data_Fledg_Mig_sed %>% 
+  filter(!is.na(Avg_distance_km_sed)) %>%
+  filter(!is.na(Sex))
+
+data_distance_day_sed <- data_distance_day_sed %>% 
+  filter(!is.na(Sex))
+
+plotO <- ggplot(data_distance_avg_sed, aes(x = Status_qPCR, y = Avg_distance_km_sed, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotP <- ggplot(data_distance_day_sed, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) 
+
+plotQ <- ggplot(data_distance_avg_sed, aes(x = Status_qPCR, y = Avg_distance_km_sed, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Average distance (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(~Sex)
+
+plotR <- ggplot(data_distance_day_sed, aes(x = Status_qPCR, y = Day_distance_km, fill = Status_qPCR, col= Status_qPCR)) +
+  geom_point() + 
+  geom_boxplot(alpha = 0.5) + 
+  labs(y = "Distance by day (km)", x = "Infection status") +
+  theme(
+    legend.position = "none"
+  ) + 
+  facet_grid(~Sex)
+```
+```{r}
+ggarrange(plotO, plotP, plotQ, plotR, ncol=2, nrow=2)
+```
+
+
+## 2.2. Average daily flight distances 
+### 2.2.1. Migrant birds
+```{r, message=FALSE, warning=FALSE}
+i <- ggplot(data_distance_avg_migr, aes(x=Avg_distance_km_migr)) + geom_histogram()
+j <- ggplot(data_distance_avg_migr, aes(x=Avg_distance_km_migr, fill=Status_qPCR)) + geom_histogram()
+ggarrange(i,j, ncol=1, nrow=2)
+```
+
+```{r}
+shap7 <- shapiro.test(data_distance_avg_migr$Avg_distance_km_migr)
+shap8 <- shapiro.test(data_distance_avg_migr$Avg_distance_km_migr[data_distance_avg_migr$Status_qPCR == "infected"])
+shap9 <- shapiro.test(data_distance_avg_migr$Avg_distance_km_migr[data_distance_avg_migr$Status_qPCR == "uninfected"])
+
+shapiro_test_results_migr <- data.frame(
+  Shapiro_test = c("Avg_distance_km_migr", "Avg_distance_km_migr - infected", "Avg_distance_km_migr - uninfected"),
+  p_value = c(shap7$p.value, shap8$p.value, shap9$p.value))
+
+shapiro_test_results_migr %>%
+  kable(caption = "Shapiro results of Avg_distance_km_migr") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+**All p-value < 0.05**\
+
+```{r}
+leveneTest(data_distance_avg_migr$Avg_distance_km_migr ~ data_distance_avg_migr$Status_qPCR)
+```
+
+**p-value > 0.05**\
+Variances are egal but `data_distance_avg_migr$Avg_distance_km_migr` is not normally distributed. **We will use non-parametric tests but LMER models for which we will test the distribution of model residuals.**\
+
+**Wilcoxon rank-sum test:**
+```{r, message=FALSE, warning=FALSE}
+wilcox.test(Avg_distance_km_migr ~ Status_qPCR, data = data_distance_avg_migr, exact = TRUE)
+```
+
+**p-value = 0.6883**\
+**There is no difference in mean of the average distance (km) traveled as migrants according to infection status.**\
+
+**LMER model:**\
+We will test the influence of `Status_qPCR` on `Avg_distance_km_migr` using LMER models and then test for the distribution of model residuals. We include the variable `Status_qPCR` as a fixed effect and `Site` and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_avg_distance_migr_full <- lmer(Avg_distance_km_migr ~ Status_qPCR + (1|Site) + (1|Year), data=data_distance_avg_migr)
+lmer_avg_distance_migr_null <- lmer(Avg_distance_km_migr ~ 1 + (1|Site) + (1|Year), data=data_distance_avg_migr)
+AICc(lmer_avg_distance_migr_full)
+AICc(lmer_avg_distance_migr_null)
+anova(lmer_avg_distance_migr_full, lmer_avg_distance_migr_null, test="Chisq")
+tab_model(lmer_avg_distance_migr_full, lmer_avg_distance_migr_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `1 + (1|Site) + (1|Year)`.\
+We examine the best-fitted model: 
+```{r}
+residuals_lmer_avg_dist_migr <- residuals(lmer_avg_distance_migr_null)
+hist(residuals_lmer_avg_dist_migr)
+shapiro.test(residuals(lmer_avg_distance_migr_null))
+```
+
+**Conclusion**:\
+There is no significant difference between infected and uninfected birds that migrated**.\
+
+Some metrics:
+```{r}
+summary_avg_migr <- data_distance_avg_migr %>%
+  group_by(Status_qPCR) %>%
+  summarise(
+    mean = mean(Avg_distance_km_migr, na.rm = TRUE),
+    SD = sd(Avg_distance_km_migr),
+    SE = sd(Avg_distance_km_migr, na.rm = TRUE) / sqrt(length(Avg_distance_km_migr)),
+    n = length(Avg_distance_km_migr)
+    )
+kable(summary_avg_migr, align="lccc")
+```
+
+Infected migrant birds traveled around 80.01 km vs 78.69 km for uninfected ones.
+
+
+### 2.2.2. Sedentary birds
+```{r, message=FALSE, warning=FALSE}
+k <- ggplot(data_distance_avg_sed, aes(x=Avg_distance_km_sed)) + geom_histogram()
+l <- ggplot(data_distance_avg_sed, aes(x=Avg_distance_km_sed, fill=Status_qPCR)) + geom_histogram()
+ggarrange(k,l, ncol=1, nrow=2)
+```
+
+```{r}
+shap10 <- shapiro.test(data_distance_avg_sed$Avg_distance_km_sed)
+shap11 <- shapiro.test(data_distance_avg_sed$Avg_distance_km_sed[data_distance_avg_sed$Status_qPCR == "infected"])
+shap12 <- shapiro.test(data_distance_avg_sed$Avg_distance_km_sed[data_distance_avg_sed$Status_qPCR == "uninfected"])
+
+shapiro_test_results_sed <- data.frame(
+  Shapiro_test = c("Avg_distance_km_sed", "Avg_distance_km_sed - infected", "Avg_distance_km_sed - uninfected"),
+  p_value = c(shap10$p.value, shap11$p.value, shap12$p.value))
+
+shapiro_test_results_sed %>%
+  kable(caption = "Shapiro results of Avg_distance_km_sed") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+**All p-value > 0.05**\
+
+```{r}
+leveneTest(data_distance_avg_sed$Avg_distance_km_sed ~ data_distance_avg_sed$Status_qPCR)
+```
+
+**p-value > 0.05**\
+Variances are egal and `data_distance_avg_sed$Avg_distance_km_sed` is normally distributed. **We will use parametric tests and LMER models for which we will test the distribution of model residuals.**\
+
+**Two Sample t-test:**
+```{r}
+t.test(data_distance_avg_sed$Avg_distance_km_sed ~ data_distance_avg_sed$Status_qPCR, var.equal = TRUE)
+```
+**p = 0.8308 > 0.05**\
+**There is no difference in mean of the average distance (km) traveled as sedentary according to infection status**.\
+
+
+**LMER model:**\
+We will test the influence of `Status_qPCR` on `Avg_distance_km_sed` using LMER models and then test for the distribution of model residuals. We include the variable `Status_qPCR` as a fixed effect and `Site` and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_avg_distance_sed_full <- lmer(Avg_distance_km_sed ~ Status_qPCR + (1|Site) + (1|Year), data=data_distance_avg_sed)
+lmer_avg_distance_sed_null <- lmer(Avg_distance_km_sed ~ 1 + (1|Site) + (1|Year), data=data_distance_avg_sed)
+AICc(lmer_avg_distance_sed_full)
+AICc(lmer_avg_distance_sed_null)
+anova(lmer_avg_distance_sed_full, lmer_avg_distance_sed_null, test="Chisq")
+tab_model(lmer_avg_distance_sed_full, lmer_avg_distance_sed_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `1 + (1|Site) + (1|Year)`.\
+We examine the best-fitted model: 
+```{r}
+residuals_lmer_avg_dist_sed <- residuals(lmer_avg_distance_sed_null)
+hist(residuals_lmer_avg_dist_sed)
+shapiro.test(residuals(lmer_avg_distance_sed_null))
+```
+
+**Conclusion**:\
+**There is no significant difference between infected and uninfected birds during their sedentary phase**.\
+
+Some metrics:
+```{r}
+summary_avg_sed <- data_distance_avg_sed %>%
+  group_by(Status_qPCR) %>%
+  summarise(
+    mean = mean(Avg_distance_km_sed, na.rm = TRUE),
+    SD = sd(Avg_distance_km_sed),
+    SE = sd(Avg_distance_km_sed, na.rm = TRUE) / sqrt(length(Avg_distance_km_sed)),
+    n = length(Avg_distance_km_sed)
+    )
+kable(summary_avg_sed, align="lccc")
+```
+
+Infected sedentary birds traveled around 34.07 km vs 35.19 km for uninfected ones.
+
+
+## 2.3. Daily flight distances
+### 2.3.1. Migrant birds
+```{r, message=FALSE, warning=FALSE}
+m <- ggplot(data_distance_day_migr, aes(x=Day_distance_km)) + geom_histogram()
+n <- ggplot(data_distance_day_migr, aes(x=Day_distance_km, fill=Status_qPCR)) + geom_histogram()
+ggarrange(m,n, ncol=1, nrow=2)
+shapiro.test(data_distance_day_migr$Day_distance_km)
+```
+
+```{r, message=FALSE, warning=FALSE}
+fit_gamma_migr <- fitdist(data_distance_day_migr$Day_distance_km, "gamma")
+fit_lognormal_migr <- fitdist(data_distance_day_migr$Day_distance_km, "lnorm")
+plot(fit_gamma_migr)
+plot(fit_lognormal_migr)
+gofstat(list(fit_gamma_migr, fit_lognormal_migr))
+```
+
+Based on these results, we include the variables `Status_qPCR` in interaction as a fixed effect and `Site`, `Year`, and `Sample` as random effects in our full **LMER model with log-transformed data**, then test for distribution of model residuals:
+```{r, message=FALSE, warning=FALSE}
+data_distance_day_migr$log_distance_day <- log10(data_distance_day_migr$Day_distance_km)
+
+lmer_day_distance_migr_full <- lmer(log_distance_day ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sample), data = data_distance_day_migr)
+lmer_day_distance_migr_null <- lmer(log_distance_day ~ 1 + (1|Site) + (1|Year) + (1|Sample), data = data_distance_day_migr)
+anova(lmer_day_distance_migr_full, lmer_day_distance_migr_null, test="Chisq")
+tab_model(lmer_day_distance_migr_full, lmer_day_distance_migr_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `1 + (1|Site) + (1|Year) + (Sample)`.\
+We examine the best-fitted model: 
+```{r}
+residuals_lmer_day_dist_migr <- residuals(lmer_day_distance_migr_null)
+hist(residuals_lmer_day_dist_migr)
+shapiro.test(residuals(lmer_day_distance_migr_null))
+```
+
+Conclusion:\
+**The infection status doesn't influence the daily distances traveled by migrant birds**.\
+
+### 2.3.2. Sedentary birds
+```{r, message=FALSE, warning=FALSE}
+o <- ggplot(data_distance_day_sed, aes(x=Day_distance_km)) + geom_histogram()
+p <- ggplot(data_distance_day_sed, aes(x=Day_distance_km, fill=Status_qPCR)) + geom_histogram()
+ggarrange(o,p, ncol=1, nrow=2)
+shapiro.test(data_distance_day_sed$Day_distance_km)
+```
+
+```{r, message=FALSE, warning=FALSE}
+fit_gamma_sed <- fitdist(data_distance_day_sed$Day_distance_km, "gamma")
+fit_lognormal_sed <- fitdist(data_distance_day_sed$Day_distance_km, "lnorm")
+plot(fit_gamma_sed)
+plot(fit_lognormal_sed)
+gofstat(list(fit_gamma_sed, fit_lognormal_sed))
+```
+
+Based on these results, we include the variables `Status_qPCR` in interaction as a fixed effect and `Site`, `Year`, and `Sample` as random effects in our full **LMER model with log-transformed data**, then test for distribution of model residuals:
+```{r, message=FALSE, warning=FALSE}
+data_distance_day_sed$log_distance_day <- log10(data_distance_day_sed$Day_distance_km)
+
+lmer_day_distance_sed_full <- lmer(log_distance_day ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sample), data = data_distance_day_sed)
+lmer_day_distance_sed_null <- lmer(log_distance_day ~ 1 + (1|Site) + (1|Year) + (1|Sample), data = data_distance_day_sed)
+anova(lmer_day_distance_sed_full, lmer_day_distance_sed_null, test="Chisq")
+tab_model(lmer_day_distance_sed_full, lmer_day_distance_sed_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `1 + (1|Site) + (1|Year) + (Sample)`.\
+We examine the best-fitted model: 
+```{r}
+residuals_lmer_day_dist_sed <- residuals(lmer_day_distance_sed_null)
+hist(residuals_lmer_day_dist_sed)
+shapiro.test(residuals(lmer_day_distance_sed_null))
+```
+
+Conclusion:\
+**The infection status doesn't influence the daily distances traveled by sedentary birds**.\
+
+
+# 3. Summary
+The infection status **doesn't influence**:\
+-**the fledging age** (Two Sample t-test, p-value = 0.88; LMER, p-value ANOVA vs null = 0.39, AICc = 202.89 vs 204.58),\
+-**the age of departure on migration** (Permutation-based one-way test, p-value = 0.90; LMER, p-value ANOVA vs null = 0.91, AICc = 143.73 vs 144.56),\
+-**the overall migration strategy** (Fisher's test, p-value = 1; GLMER, p-value ANOVA vs null = 0.64, AICc = 58.84 vs 56.35).\  
+
+**The infection doesn't influence the average or daily distances traveled by birds, migrant or sedentary**.

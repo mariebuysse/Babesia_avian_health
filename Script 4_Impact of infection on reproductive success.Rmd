@@ -1,0 +1,671 @@
+---
+title: "Script 4 - Impact of infection on reproductive success"
+subtitle: "Blood parasites and avian health"
+author: "Marie Buysse, Mathilde Ollagnier, Charly Souc, Marjorie Bruley, Thomas Blanchon, Carole Leray, Marion Vittecoq and Karen D. McCoy"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0.Librairies
+```{r, message=FALSE, warning=FALSE}
+library(readxl) #read_excel function
+library(ggplot2)
+library(dplyr)
+library(mgcv) #gamm function 
+library(kableExtra) #kable function
+library(ggpubr) #ggarrange function
+library(lme4) #lmer function
+library(sjPlot) #tab_model function
+library(DHARMa) #simulateResiduals function
+library(rstatix) #wilcox_effsize function
+library(MuMIn) #AICc function
+```
+
+**Information about data visualisation:**\
+For a same variable, one data visualisation is based on fixed effect selected in the best-fitted model and most significant random effects. Another visualisation include the infection status or parasitemia, whether significant or not.
+
+
+# 1. Determining individual growth dynamics
+## 1.1. Dataset
+```{r}
+data <- read_excel("Data_Impact of infection on reproductive success_growth_raw_data.xlsx")
+data$tarse <- as.numeric(data$tarse)
+data$days <- as.numeric(data$days)
+```
+With:\
+-Site: sampling colony (Carteau/Frioul)\
+-Bague.metal: ID of individual bird\
+-Year: sampling year (2022/2023/2024)\
+-masse : Mass of the individual in grams\
+-tarse: length of the tarsus (mm)\
+-Sexe: sex of bird (F/M)\
+-days: number of days since hatching\ 
+
+
+## 1.2. Modeling the growth with a GAMM
+```{r}
+model <- gamm(tarse ~ s(days),random = list(Bague.metal = ~days), data = data)
+summary(model$gam)
+plot(model$gam)
+```
+
+
+## 1.3. Calculate the mean residuals sums for each individuals
+```{r}
+#calculate the residuals
+residuals_individual <- resid(model$gam)
+data$residuals <- residuals_individual
+#create a DF with the mean residuals for each individuals
+residual_sum <- aggregate(residuals ~ Bague.metal, data = data, sum)
+```
+
+
+## 1.4. Calculate slope of growth for each indivuals before the deceleration point
+We identify the end of the rapid growth phase by finding the minimum of the second derivative, which marks the point where growth deceleration is at its strongest, indicating a transition to a slower growth phase:
+```{r}
+#create the predicted growth curve from the model             
+prediction_data <- data.frame(days = seq(min(data$days), max(data$days), length.out = 100))
+predictions <- predict(model$gam, newdata = prediction_data, type = "response")
+prediction_data$tarse_predicted <- predictions
+
+#calculate the slope of the chick growth curve before the onset of deceleration
+# extract spline matrix for model predictions.
+X <- predict(model$gam, newdata = prediction_data, type = "lpmatrix")
+spline_columns <- grep("days", colnames(X))
+# compute first and second derivatives of the splines matrix.
+dX <- diff(X[, spline_columns]) / diff(prediction_data$days)  #first derivatives of the splines
+d2X <- diff(dX) / diff(prediction_data$days[-1])  # second derivatives of the splines
+# multiply by the coefficient to obtain the overall derivatives
+coefs <- coef(model$gam)
+d1 <- dX %*% coefs[spline_columns]  # first derivatives
+d2 <- d2X %*% coefs[spline_columns]  # second derivatives
+
+# add the computate derivatives to prediction_data 
+prediction_data$d1 <- c(NA, d1)  # add NA to align dimensions
+prediction_data$d2 <- c(NA, NA, d2)  # two NAs needed for alignment with diff()
+
+#plot the second derivative (to see the deceleration point)
+plot(prediction_data$days, prediction_data$d2, type = "l",
+     xlab = "Days since hatching", ylab = "second derivatives",
+     main = "second derivatives", col = "purple", lwd = 2)
+
+#identify the day when the second derivative reaches its minimum (deceleration point)
+turning_point <- which.min(prediction_data$d2)
+turning_day <- prediction_data$days[turning_point]
+#output the deceleration point (19.28 days)
+print(turning_day)
+
+
+#filter the data for keep only the data before the deceleration point (here 19.28)
+datapente <- data[data$days <= 19, ]
+
+#calculate growth slopes for each individual before the deceleration point
+#fit a linear model for each individual
+get_slope <- function(subset_data) {
+  model <- lm(tarse ~ days, data = subset_data)
+  return(coef(model)["days"])}
+#compute the individual growth rate (with slopes) for each indivuals before the deceleration point (19 days)
+pente_individuelle <- datapente %>% group_by(Bague.metal) %>% summarize(slope = get_slope(pick(everything())))
+```
+
+
+# 2. Impact of infection on the modeled growth
+## 2.1. Datasets
+`data_1` includes data for overall residuals and slope by individual according to their infection status and other variables:
+```{r, message=FALSE, warning=FALSE}
+data_1 <- read_excel("Data_Impact of infection on reproductive success_growth_metrics.xlsx")
+data_1$Site <- as.factor(data_1$Site)
+data_1$Sample <- as.factor(data_1$Sample)
+data_1$Year <- as.factor(data_1$Year)
+data_1$Age <- as.factor(data_1$Age)
+data_1$Sex <- as.factor(data_1$Sex)
+data_1$Status_qPCR <- as.factor(data_1$Status_qPCR)
+data_1$residuals <- as.numeric(data_1$residuals)
+data_1$slope <- as.numeric(data_1$slope)
+```
+With:\
+-Site: sampling colony (Carteau/Frioul)\
+-Sample: ID of individual bird\
+-Year: sampling year (2022/2023/2024)\
+-Age: age of bird (Chick/Adult)\
+-Sex: sex of bird (F/M)\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-residuals: overall indicator of chick growth calculated according to section 1.3.\
+-slope: average growth rate of chicks calculated according to section 1.4.\  
+
+Individuals for whom sex and infection status have not been determined are removed: 
+```{r}
+data_1 <- data_1[complete.cases(data_1[ , 6]),]
+data_1 <- data_1[complete.cases(data_1[ , 5]),]
+```
+
+`data_2` includes data for residuals at the time that the blood was drawn, enabling the infectious status and parasitaemia at time t to be determined, and other variables:
+```{r, message=FALSE, warning=FALSE}
+data_2 <- read_excel("Data_Impact of infection on reproductive success_growth_metrics_timepoint.xlsx")
+data_2$Site <- as.factor(data_2$Site)
+data_2$Sample <- as.factor(data_2$Sample)
+data_2$Year <- as.factor(data_2$Year)
+data_2$Age <- as.factor(data_2$Age)
+data_2$Sex <- as.factor(data_2$Sex)
+data_2$Days <- as.numeric(data_2$Days)
+data_2$Status_qPCR <- as.factor(data_2$Status_qPCR)
+data_2$Ratio_qPCR <- as.numeric(data_2$Ratio_qPCR)
+data_2$ErrorRatio_qPCR <- as.numeric(data_2$ErrorRatio_qPCR)
+data_2$residuals_timet <- as.numeric(data_2$residuals_timet)
+```
+With:\
+-Site: sampling colony (Carteau/Frioul)\
+-Sample: ID of individual bird\
+-Year: sampling year (2022/2023/2024)\
+-Age: age of bird (Chick/Adult)\
+-Sex: sex of bird (F/M)\
+-Nest:nest of bird\
+-Sampling.date: measurement date\
+-Hatching.date.estimate: estimated hatching date\
+-Days: number of days since hatching\
+-Hemoglobin: measure of circulating concentration of hemoglobin\
+-Tarsus: length of the tarsus\
+-Weight: bird weight\
+-RatioWT: ratio between `Weight` and `Tarsus`\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-Ratio_qPCR: quantification of *Babesia* based on qPCR technique (ratio Larus/*Babesia* copies of genes)\
+-ErrorRatio_qPCR: ratio error associated with `Ratio_qPCR`\
+-residuals_timet: indicator of chick growth at time t according to section 1.3.\  
+
+Non-infected individuals are removed:
+```{r}
+data_2 <- data_2 %>%
+  filter(!is.na(Status_qPCR))
+
+data_2 <- data_2[which(data_2$Status_qPCR == "infected"),]
+data_2 <- data_2 %>%
+  filter(!is.na(Ratio_qPCR))
+```
+
+
+## 2.2. With model residuals
+Individuals without `residuals` values are removed:
+```{r}
+data_1_res <- data_1[complete.cases(data_1[ , 7]),]
+```
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_1_res, aes(x=residuals)) + geom_histogram()
+shapiro.test(data_1_res$residuals)
+```
+
+Even if p-value is lower than 0.05 (p-value = 3.118e-05), **we will perform the analyses on `data_1_res$residuals` using LMER and check for distribution of model residuals**.\
+
+Regarding `residuals_timet`:
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_2, aes(x=residuals_timet)) + geom_histogram()
+shapiro.test(data_2$residuals_timet)
+```
+
+Even if p-value is lower than 0.05 (p-value = 0.0394), **we will perform the analyses on `data_2$residuals_timet` using LMER and check for distribution of model residuals**.\
+
+
+### 2.2.1. Based on infectious status (binary: infected/uninfected)
+We include the variables `Status_qPCR` and `Sex` as fixed effects and `Site` and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_res_full <- lmer(residuals ~ Status_qPCR*Sex + (1|Site) + (1|Year), data=data_1_res)
+```
+
+Let's use ANOVA and AICc comparisons to find the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+lmer_res_1 <- lmer(residuals ~ Status_qPCR + Sex + (1|Site) + (1|Year), data=data_1_res)
+anova(lmer_res_full, lmer_res_1, test="Chisq")
+AICc(lmer_res_full)
+AICc(lmer_res_1)
+tab_model(lmer_res_full, lmer_res_1, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, even if the AICc of the full model is lower, ANOVA indicates that the interaction between `Status_qPCR` and `Sex` does not significantly improve the model.\
+
+```{r, message=FALSE, warning=FALSE}
+lmer_res_2 <- lmer(residuals ~ Status_qPCR + (1|Site) + (1|Year), data=data_1_res)
+lmer_res_3 <- lmer(residuals ~ Sex + (1|Site) + (1|Year), data=data_1_res)
+lmer_res_null <- lmer(residuals ~ 1 + (1|Site) + (1|Year), data=data_1_res)
+
+anova_res_1 <- anova(lmer_res_1, lmer_res_2, test="Chisq")
+anova_res_2 <- anova(lmer_res_1, lmer_res_3, test="Chisq")
+anova_res_3 <- anova(lmer_res_2, lmer_res_null, test="Chisq")
+anova_res_4 <- anova(lmer_res_3, lmer_res_null, test="Chisq")
+
+p_value_anova_res_1 <- anova_res_1$`Pr(>Chisq)`[2]
+p_value_anova_res_2 <- anova_res_2$`Pr(>Chisq)`[2]
+p_value_anova_res_3 <- anova_res_3$`Pr(>Chisq)`[2]
+p_value_anova_res_4 <- anova_res_4$`Pr(>Chisq)`[2]
+
+anova_results_res <- data.frame(
+  Comparison = c("Status_qPCR+Sex", "Status_qPCR+Sex vs Status_qPCR", "Status_qPCR+Sex vs Sex", "null vs Status_qPCR", "null vs Sex", "null"),
+  P_value = c("-", p_value_anova_res_1, p_value_anova_res_2, p_value_anova_res_3, p_value_anova_res_4, "-"),
+  AICc = c(AICc(lmer_res_1), AICc(lmer_res_2), AICc(lmer_res_3), "-", "-", AICc(lmer_res_null)))
+
+anova_results_res %>%
+  kable(caption = "ANOVA Results between Status_qPCR + Sex and other models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+tab_model(lmer_res_1, lmer_res_2, lmer_res_3, lmer_res_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `Status_qPCR + Sex + (1|Site) + (1|Year)`.\
+We examine the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+summary(lmer_res_1)
+simulationOutput_res <- simulateResiduals(fittedModel = lmer_res_1, plot = F)
+plot(simulationOutput_res)
+testResiduals(simulationOutput_res)
+residuals_lmer_res_1 <- residuals(lmer_res_1)
+hist(residuals_lmer_res_1)
+shapiro.test(residuals(lmer_res_1))
+```
+
+Based on these tests:\
+-Uniformity test: since p > 0.05, the residuals do not significantly deviate from uniformity, meaning the residuals are acceptable\
+-Dispersion test: Since p > 0.05, there’s no evidence of overdispersion or underdispersion\
+-Outlier test: since p > 0.05, the number of outliers is not excessive and is within the expected range.\
+**We consider `Status_qPCR + Sex + (1|Site) + (1|Year)` as the best-fitted model.**\
+
+**The infection status and the sex are fixed effects influencing the growth of birds based on calculated residuals.**\  
+
+Some key results from our model:\
+Males exhibit higher residuals than females (IRR = 9.49, p < 0.01) and uninfected individuals have significantly (p < 0.05) higher residuals than infected ones (the residuals are about 9.11 units higher for uninfected individuals compared to infected ones, holding other factors constant).\  
+
+Visualisation:
+```{r}
+plotA <- ggplot(data_1_res, aes(x= Status_qPCR, y= residuals, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+labs(x = "Infection status",
+       y = "Residuals", 
+       title = "Residuals according to sex, site and infection status")+ 
+  theme(plot.title = element_text(size = 9),
+        legend.position = "none") + 
+  facet_grid(Site~Sex,scales = "free_x")
+plotA
+```
+
+
+### 2.2.2. Based on parasitemia (continuous)
+In this section, we based our analyses on `residuals_timet` that correspond to residuals at the time that the blood was drawn, enabling to match with the parasitemia at this exact time t.\ 
+
+We include the variables `Ratio_qPCR` and `Sex` as fixed effects and `Site` and `Year` as random effects in our full LMER model. We will also analyse the `Ratio_qPCR` with a log-transformation:
+```{r, message=FALSE, warning=FALSE}
+data_2$log_ratio_qPCR <- log10(data_2$Ratio_qPCR)
+lmer_res_full_ratio <- lmer(residuals_timet ~ log_ratio_qPCR * Sex + (1|Site) + (1| Year), data=data_2)
+```
+
+Let's use ANOVA and AICc comparisons to find the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+lmer_res_1_ratio <- lmer(residuals_timet ~ log_ratio_qPCR + Sex + (1|Site) + (1| Year), data=data_2)
+anova(lmer_res_full_ratio, lmer_res_1_ratio, test="Chisq")
+AICc(lmer_res_full_ratio)
+AICc(lmer_res_1_ratio)
+tab_model(lmer_res_full_ratio, lmer_res_1_ratio, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, even if the AICc of the full model is lower, ANOVA indicates that the interaction between `log_ratio_qPCR` and `Sex` does not significantly improve the model.\
+
+```{r, message=FALSE, warning=FALSE}
+lmer_res_2_ratio <- lmer(residuals_timet ~ log_ratio_qPCR + (1|Site) + (1| Year), data=data_2)
+lmer_res_3_ratio <- lmer(residuals_timet ~ Sex + (1|Site) + (1| Year), data=data_2)
+lmer_res_null_ratio <- lmer(residuals_timet ~ 1 + (1|Site) + (1| Year), data=data_2)
+
+anova_res_1_ratio <- anova(lmer_res_1_ratio, lmer_res_2_ratio, test="Chisq")
+anova_res_2_ratio <- anova(lmer_res_1_ratio, lmer_res_3_ratio, test="Chisq")
+anova_res_3_ratio <- anova(lmer_res_2_ratio, lmer_res_null_ratio, test="Chisq")
+anova_res_4_ratio <- anova(lmer_res_3_ratio, lmer_res_null_ratio, test="Chisq")
+
+p_value_anova_res_1_ratio <- anova_res_1_ratio$`Pr(>Chisq)`[2]
+p_value_anova_res_2_ratio <- anova_res_2_ratio$`Pr(>Chisq)`[2]
+p_value_anova_res_3_ratio <- anova_res_3_ratio$`Pr(>Chisq)`[2]
+p_value_anova_res_4_ratio <- anova_res_4_ratio$`Pr(>Chisq)`[2]
+
+anova_results_res_ratio <- data.frame(
+  Comparison = c("log_ratio_qPCR+Sex", "log_ratio_qPCR+Sex vs log_ratio_qPCR", "log_ratio_qPCR+Sex vs Sex", "null vs log_ratio_qPCR", "null vs Sex", "null"),
+  P_value = c("-", p_value_anova_res_1_ratio, p_value_anova_res_2_ratio, p_value_anova_res_3_ratio, p_value_anova_res_4_ratio, "-"),
+  AICc = c(AICc(lmer_res_1_ratio), AICc(lmer_res_2_ratio), AICc(lmer_res_3_ratio), "-", "-", AICc(lmer_res_null_ratio)))
+
+anova_results_res_ratio %>%
+  kable(caption = "ANOVA Results between log_ratio_qPCR + Sex and other models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+tab_model(lmer_res_1_ratio, lmer_res_2_ratio, lmer_res_3_ratio, lmer_res_null_ratio, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results:\
+-The ANOVA between `null vs log_ratio_qPCR` does suggest that `log_ratio_qPCR` play a role in `residuals_timet` variance.\
+-The AICc of the model with `log_ratio_qPCR` and `Sex` is the lowest, even if the effect of `Sex` is not as significant as the one of `log_ratio_qPCR`.\
+-The ANOVA between `log_ratio_qPCR + Sex` and `log_ratio_qPCR` suggest that the addition of `Sex` is not significant.\
+
+Based on these results, the best-fitted model is `log_ratio_qPCR + (1|Site)`.\
+We examine the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+summary(lmer_res_2_ratio)
+residuals_lmer_res_2_ratio <- residuals(lmer_res_2_ratio)
+hist(residuals_lmer_res_2_ratio)
+shapiro.test(residuals(lmer_res_2_ratio))
+simulationOutput_res_ratio <- simulateResiduals(fittedModel = lmer_res_2_ratio, plot = F)
+plot(simulationOutput_res_ratio)
+testResiduals(simulationOutput_res_ratio)
+```
+
+**The residuals at the time that parasitemia was measured are influenced by the *Babesia* load. There is a negative correlation between the residuals and the parasitemia (IRR = -1.21, p = 0.003).**\
+
+Visualisation:
+```{r, message=FALSE, warning=FALSE}
+plotB <- ggplot(data_2, aes(x= log_ratio_qPCR, y= residuals_timet)) +
+  geom_point() +
+  geom_smooth(method = lm) + 
+  labs(x = "log10(Ratio_qPCR)",
+       y = "Residuals_timet", 
+       title = "Residuals at time t according to parasitemia")+ 
+  theme(plot.title = element_text(size = 9))
+plotB
+```
+
+
+## 2.3. With model slope
+Individuals without `slope` values are removed:
+```{r}
+data_1_slope <- data_1[complete.cases(data_1[ , 8]),]
+```
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(data_1_slope, aes(x=slope)) + geom_histogram()
+shapiro.test(data_1_slope$slope)
+```
+
+Even if p-value is lower than 0.05 (p-value = 0.006038), **we will perform the analyses on `data_1_slope$slope` using LMER and check for distribution of model residuals**. 
+
+### 2.3.1. Based on infectious status (binary: infected/uninfected)
+We include the variables `Status_qPCR` and `Sex` as fixed effects and `Site`  and `Year` as random effects in our full LMER model:
+```{r, message=FALSE, warning=FALSE}
+lmer_slope_full <- lmer(slope ~ Status_qPCR*Sex + (1|Site) + (1|Year), data=data_1_slope)
+```
+
+Let's use ANOVA and AICc comparisons to find the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+lmer_slope_1 <- lmer(slope ~ Status_qPCR + Sex + (1|Site) + (1|Year), data=data_1_slope)
+anova(lmer_slope_full, lmer_slope_1, test="Chisq")
+AICc(lmer_slope_full)
+AICc(lmer_slope_1)
+tab_model(lmer_slope_full, lmer_slope_1, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the AICc of the model without interaction is lower and ANOVA indicates that the interaction between `Status_qPCR` and `Sex` does not significantly improve the model.\
+
+```{r, message=FALSE, warning=FALSE}
+lmer_slope_2 <- lmer(slope ~ Status_qPCR + (1|Site) + (1|Year), data=data_1_slope)
+lmer_slope_3 <- lmer(slope ~ Sex + (1|Site) + (1|Year), data=data_1_slope)
+lmer_slope_null <- lmer(slope ~ 1 + (1|Site) + (1|Year), data=data_1_slope)
+
+anova_slope_1 <- anova(lmer_slope_1, lmer_slope_2, test="Chisq")
+anova_slope_2 <- anova(lmer_slope_1, lmer_slope_3, test="Chisq")
+anova_slope_3 <- anova(lmer_slope_2, lmer_slope_null, test="Chisq")
+anova_slope_4 <- anova(lmer_slope_3, lmer_slope_null, test="Chisq")
+
+p_value_anova_slope_1 <- anova_slope_1$`Pr(>Chisq)`[2]
+p_value_anova_slope_2 <- anova_slope_2$`Pr(>Chisq)`[2]
+p_value_anova_slope_3 <- anova_slope_3$`Pr(>Chisq)`[2]
+p_value_anova_slope_4 <- anova_slope_4$`Pr(>Chisq)`[2]
+
+anova_results_slope <- data.frame(
+  Comparison = c("Status_qPCR+Sex", "Status_qPCR+Sex vs Status_qPCR", "Status_qPCR+Sex vs Sex", "null vs Status_qPCR", "null vs Sex", "null"),
+  P_value = c("-", p_value_anova_slope_1, p_value_anova_slope_2, p_value_anova_slope_3, p_value_anova_slope_4, "-"),
+  AICc = c(AICc(lmer_slope_1), AICc(lmer_slope_2), AICc(lmer_slope_3), "-", "-", AICc(lmer_slope_null)))
+
+anova_results_slope %>%
+  kable(caption = "ANOVA Results between Status_qPCR + Sex and other models") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+tab_model(lmer_slope_1, lmer_slope_2, lmer_slope_3, lmer_slope_null, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+Based on these results, the best-fitted model is `Status_qPCR + (1|Site) + (1|Year)`.\
+We examine the best-fitted model:
+```{r, message=FALSE, warning=FALSE}
+summary(lmer_slope_2)
+simulationOutput_slope <- simulateResiduals(fittedModel = lmer_slope_2, plot = F)
+plot(simulationOutput_slope)
+testResiduals(simulationOutput_slope)
+residuals_lmer_slope_2 <- residuals(lmer_slope_2)
+hist(residuals_lmer_slope_2)
+shapiro.test(residuals(lmer_slope_2))
+```
+
+Based on these tests:\
+-Uniformity test: since p > 0.05, the residuals do not significantly deviate from uniformity, meaning the residuals are acceptable\
+-Dispersion test: Since p > 0.05, there’s no evidence of overdispersion or underdispersion\
+-Outlier test: since p > 0.05, the number of outliers is not excessive and is within the expected range\
+-Residuals of the model are normally distributed.\
+**We consider `Status_qPCR + (1|Site) + (1|Year)` as the best-fitted model.**\
+
+**The infection status is a fixed effect influencing the growth of birds based on calculated slope**\  
+
+Some key results from our model:\
+Uninfected individuals have significantly (p < 0.01) higher slope than infected ones (the slope is about 0.21 units higher for uninfected individuals compared to infected ones, holding other factors constant).\ 
+
+Visualisation:
+```{r}
+plotC <- ggplot(data_1_slope, aes(x= Status_qPCR, y= slope, color=Status_qPCR, fill=Status_qPCR))+
+  geom_point() +
+  geom_boxplot(alpha=0.5) +
+labs(x = "Infection status",
+       y = "Slope", 
+       title = "Slope according to infection status and site")+ 
+  theme(plot.title = element_text(size = 9),
+        legend.position = "none") + 
+  facet_grid(~Site)
+plotC
+```
+
+
+# 3. Impact of infection on survival
+## 3.1. Probability of chicks reaching the final ringing age
+`data_darvic` includes data for overall residuals and slope by individual according to their infection status and other variables:
+```{r, message=FALSE, warning=FALSE}
+data_darvic <- read_excel("Data_Impact of infection on reproductive success_survival_darvic.xlsx")
+data_darvic$Site <- as.factor(data_darvic$Site)
+data_darvic$Year <- as.factor(data_darvic$Year)
+data_darvic$Nest <- as.factor(data_darvic$Nest)
+data_darvic$Status_juv <- as.factor(data_darvic$Status_juv)
+data_darvic$Status_ad <- as.factor(data_darvic$Status_ad)
+data_darvic$Repro_success <- as.numeric(data_darvic$Repro_success)
+data_darvic$Bab_ratio_ad <- as.numeric(data_darvic$Bab_ratio_ad)
+data_darvic$Sex_ad <- as.factor(data_darvic$Sex_ad)
+```
+With:\
+-Site: sampling colony (Carteau/Frioul)\
+-Year: sampling year (2022/2023/2024)\
+-Nest: nest of bird\
+-Status_juv: infection status based on qPCR technique (uninfected/infected) of the chick\
+-Status_ad: infection status based on qPCR technique (uninfected/infected) of the adult\
+-Repro_success: reproductive success of the adult determined by the fact that we placed a Darvic ring on the chick (i.e. the chick reached the ringing age) (0: not ringed/1: ringed)\
+-Ad_name: ID of adult bird\
+-Bab_ratio_ad: quantification of *Babesia* based on qPCR technique (ratio Larus/*Babesia* copies of genes)\
+-Sex_ad: sex of the adult bird (F/M)\ 
+
+Individuals for whom the infection status of the adult have not been determined are removed: 
+```{r}
+data_darvic_ad <- data_darvic %>% 
+  filter(!is.na(Status_ad))
+```
+
+### 3.1.1. Fisher's test
+```{r}
+tabCont_darvic_ad <- table(data_darvic_ad$Repro_success, data_darvic_ad$Status_ad)
+tabCont_darvic_ad_marg <- addmargins(tabCont_darvic_ad)
+print(tabCont_darvic_ad_marg)
+fisher.test(tabCont_darvic_ad)
+```
+
+**p-value = 0.009301**\
+We therefore consider that the proportions are significantly different.\
+
+### 3.1.2. Model GLMER
+We include the variables `Status_ad` as a fixed effect and `Site` and `Year` as random effects in our full GLMER model (binomial family):
+```{r, message=FALSE, warning=FALSE}
+glmer_full_ad <- glmer(Repro_success ~ Status_ad + (1|Site) + (1|Year), family=binomial(link = "logit"), data=data_darvic_ad)
+glmer_null_ad <- glmer(Repro_success ~ 1 + (1|Site) + (1|Year), family=binomial(link = "logit"), data=data_darvic_ad)
+AICc(glmer_full_ad)
+AICc(glmer_null_ad)
+anova(glmer_full_ad, glmer_null_ad, test="Chisq")
+tab_model(glmer_full_ad, glmer_null_ad, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+**Based on these results, `Status_ad` is a fixed effect influencing the probability of chicks reaching the final ringing age.**\
+
+We examine the best-fitted model:
+```{r}
+summary(glmer_full_ad)
+simulationOutput_ad <- simulateResiduals(fittedModel = glmer_full_ad, plot = F)
+plot(simulationOutput_ad)
+```
+
+Some key results from our model:\
+The odds of the reproductive success assessed by the probability of chicks reaching the final ringing age are 7.60 (IRR) times significantly (p < 0.05) higher in uninfected adults compared to the infected ones.\ 
+
+Visualisation:
+```{r}
+plotD <- ggplot(data_darvic_ad, aes(x = Status_ad, fill = factor(Repro_success))) +
+  geom_bar(position = "fill") + 
+  labs(y = "Proportion",
+       x = "Adult infection status",
+       fill = "Reproductive success",
+       title = "Proportion of reproductive success according to Adult infection status") + 
+  theme(plot.title = element_text(size = 9))
+plotD
+```
+
+
+### 3.1.3. Comparison of parasitemia between adults with ou without reproductive success
+Do infected adults with `Repro_success = 1` have a lower parasitemia than infected adults with `Repro_success = 0`?\
+
+Uninfected adults were removed:
+```{r}
+data_darvic_ad_inf <- data_darvic_ad[which(data_darvic_ad$Status_ad == "infected"),]
+```
+
+```{r}
+shapiro.test(data_darvic_ad_inf$Bab_ratio_ad)
+```
+
+**p-value = 9.302e-05**\
+We will use a non-parametric test.\
+
+```{r}
+wilcox.test(Bab_ratio_ad ~ Repro_success, data = data_darvic_ad_inf)
+wilcox_effsize(data_darvic_ad_inf, Bab_ratio_ad ~ Repro_success)
+```
+
+Wilcoxon Rank-Sum Test:\
+**p-value = 0.05556**\
+This p-value is just above the typical significance threshold of 0.05, meaning the result is not statistically significant at the 5% level. You do not have strong evidence to reject the null hypothesis, so you cannot confidently say there is a difference in `Bab_ratio_ad` between `Repro_success = 0` and `Repro_success = 1`. However, the p-value is close to significance, suggesting that a trend might exist, which could be worth exploring with more data.\  
+
+Effect Size:\
+**Effsize = 0.683**\
+An effect size of 0.683 is considered large, meaning there is a substantial difference in `Bab_ratio_ad` between the groups, even if it was not statistically significant.\  
+
+**Although the p-value suggests the difference is not statistically significant, the large effect size indicates that the difference in `Bab_ratio_ad` between adults with `Repro_success = 0` and `Repro_success = 1` is likely meaningful in practice. The small sample size (especially for `Repro_success = 1`) reduces the power of the test, meaning that you might not have enough data to detect a statistically significant difference.**\
+
+We calculate some metrics about `Bab_ratio_qPCR` in both groups:
+```{r}
+summary_table <- data_darvic_ad_inf %>%
+  group_by(Repro_success) %>%
+  summarise(
+    Mean = mean(Bab_ratio_ad),
+    SD = sd(Bab_ratio_ad),
+    SE = sd(Bab_ratio_ad, na.rm = TRUE) / sqrt(length(Bab_ratio_ad)),
+    N = n())
+
+summary_table %>%
+  kable(caption = "Metrics about Bab_ratio_ad based on Repro_success") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+```
+
+
+## 3.2. Juvenile survival probability for one month post-fledging
+`data_fledging` includes data for overall residuals and slope by individual according to their infection status and other variables:
+
+```{r}
+data_fledging <- read_excel("Data_Impact of infection on reproductive success_survival_fledging.xlsx")
+data_fledging$Sample <- as.factor(data_fledging$Sample)
+data_fledging$Site <- as.factor(data_fledging$Site)
+data_fledging$Year <- as.factor(data_fledging$Year)
+data_fledging$Sex <- as.factor(data_fledging$Sex)
+data_fledging$Status_qPCR <- as.factor(data_fledging$Status_qPCR)
+data_fledging$Survival <- as.numeric(data_fledging$Survival)
+```
+With:\
+-Sample: ID of individual bird\
+-Site: sampling colony (Carteau/Frioul)\
+-Year: sampling year (2022/2023/2024)\
+-Sex: sex of the bird (F/M)\
+-Status_qPCR: infection status based on qPCR technique (uninfected/infected)\
+-Survival: survival of the chick one month post-fledging (0: death/1: alive)\  
+
+Individuals with undetermined survival were removed:
+```{r}
+data_fledging <- data_fledging %>% 
+  filter(!is.na(Survival))
+```
+
+### 3.2.1. Fisher's test
+```{r}
+tabCont_survival <- table(data_fledging$Survival, data_fledging$Status_qPCR)
+tabCont_survival_marg <- addmargins(tabCont_survival)
+print(tabCont_survival_marg)
+fisher.test(tabCont_survival)
+```
+
+**p-value = 1**\
+We therefore do not consider that the proportions are significantly different.\
+
+### 3.2.2. Model GLMER
+We include the variables `Status_qPCR` as a fixed effect and `Site`, `Sex`, and `Year` as random effects in our full GLMER model (binomial family):
+```{r, message=FALSE, warning=FALSE}
+glmer_full_fledging <- glmer(Survival ~ Status_qPCR + (1|Site) + (1|Year) + (1|Sex), family=binomial(link = "logit"), data=data_fledging)
+glmer_null_fledging <- glmer(Survival ~ 1 + (1|Site) + (1|Year) + (1|Sex), family=binomial(link = "logit"), data=data_fledging)
+AICc(glmer_full_fledging)
+AICc(glmer_null_fledging)
+anova(glmer_full_fledging, glmer_null_fledging, test="Chisq")
+tab_model(glmer_full_fledging, glmer_null_fledging, string.est = "IRR", show.aicc = TRUE, digits=2, show.ci = FALSE, show.intercept = FALSE)
+```
+
+**Based on these results, `Status_qPCR` is not a fixed effect influencing the probability of survival one month post-fledging.**\
+
+```{r}
+summary(glmer_null_fledging)
+```
+
+Visualisation:
+```{r}
+plotE <- ggplot(data_fledging, aes(x = Status_qPCR, fill = factor(Survival))) +
+  geom_bar(position = "fill") + 
+  labs(y = "Proportion",
+       x = "Infection status",
+       fill = "Survival",
+       title = "Proportion of survival of the chick one month post-fledging according to infection status") + 
+  theme(plot.title = element_text(size = 9)) + 
+  facet_grid(~Year)
+plotE
+```
+
+# 4. Summary
+**The growth of birds, either represented by calculated residuals or slope, is influenced by the infection status**.\
+**According to residuals**, males exhibit higher residuals than females (LMER, IRR = 9.49, p = 0.005) and uninfected individuals have significantly (LMER, IRR = 9.11, p = 0.023) higher residuals than infected ones (the residuals are about 9.11 units higher for uninfected individuals compared to infected ones, holding other factors constant).\
+**According to slope**, uninfected individuals have significantly (LMER, p-value ANOVA vs null = 0.017, AICc = 51.75 vs 52.52, IRR = 0.21, p = 0.007) higher slope than infected ones (the slope is about 0.21 units higher for uninfected individuals compared to infected ones, holding other factors constant).\  
+
+While looking at the impact of *Babesia* parasitemia, tests suggest that it plays a role to the variances of residuals at time t (LMER, p-value ANOVA vs null = 0.002, AICc = 141.98 vs 147.95, IRR = -1.21, p = 0.003). **There is a negative correlation between the residuals at time t and the parasitemia**.\  
+
+Looking at the impact of infection status on survival, **it influences the probability of chicks reaching the final ringing age (Fisher's test, p-value = 0.009; GLMER, p-value ANOVA vs null = 0.007, AICc = 132.62 vs 137.82, IRR = 7.60, p = 0.015)**, meaning that the probability of reaching the final ringing age of chicks from uninfected adults are 7.60 times higher compared to the infected ones.\
+However, the infection status doesn't influence the probability of survival one month post-fledging (Fisher's test, p-value = 1; GLMER, p-value ANOVA vs null = 0.755, AICc = 48.38 vs 45.84, p = 0.755).
