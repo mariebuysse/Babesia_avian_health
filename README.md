@@ -7,3 +7,5 @@ The command lines concern five major analyses:
 - Impacts on individual physiology
 - Impact of infection on reproductive success (chick growth and survival)
 - Impact of infection on movement
+
+We included a supplementary script describing the calculation of Scaled Mass Index (SMI), further used in our analyses. 
