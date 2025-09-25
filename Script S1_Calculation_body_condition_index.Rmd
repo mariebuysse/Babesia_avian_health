@@ -1,0 +1,87 @@
+---
+title: "Script S1 - Calculation of body condition index"
+subtitle: "Blood parasites and avian health"
+author: "Marie Buysse, Mathilde Ollagnier, Charly Souc, Marjorie Bruley, Thomas Blanchon, Carole Leray, Marion Vittecoq and Karen D. McCoy"
+output:
+  html_document:
+    theme: cerulean
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 0.Librairies
+
+```{r, message=FALSE, warning=FALSE}
+library(readxl) # read_excel function
+library(dplyr) # for data wrangling and joins
+library(ggplot2) # for plotting
+library(smatr) # for SMA regression
+library(tidyr)
+library(ggpubr) # ggarrange function
+library(mgcv) # gam function
+```
+
+# 1. Calculate the Scaled Mass Index (SMI)
+
+The full command lines are below:
+
+```{r}
+# Read data with original columns assumed: ID, agecat, mass, tarsus
+df_physiomeasures <- read_excel("DF_physiomeasures.xlsx")
+
+# Subset adults and chicks
+adults <- filter(df_physiomeasures, agecat == "Adult") %>% 
+  filter(!is.na(year), !is.na(mass), !is.na(tarsus))
+chicks <- filter(df_physiomeasures, agecat == "Chick") %>% 
+  filter(!is.na(year), !is.na(mass), !is.na(tarsus))
+
+# Function to calculate SMI given slope b_SMA and length mean L0 for group
+calculate_SMI <- function(data, mass_col, tarsus_col, id_col, year_col, b_SMA, L0) {
+  SMI <- data[[mass_col]] * (L0 / data[[tarsus_col]])^b_SMA
+  data.frame(ID = data[[id_col]], year = data[[year_col]], SMI = SMI)
+}
+
+# Adults SMA fit and slope
+adults_sma_fit <- sma(log(mass) ~ log(tarsus), data = adults)
+b_SMA_adult <- adults_sma_fit$coef[[1]][2,1]  # slope estimate
+L0_adult <- mean(adults$tarsus)
+
+summary(adults_sma_fit)
+
+# Chicks SMA fit and slope
+chicks_sma_fit <- sma(log(mass) ~ log(tarsus), data = chicks)
+b_SMA_chick <- chicks_sma_fit$coef[[1]][2,1]
+L0_chick <- mean(chicks$tarsus)
+
+summary(chicks_sma_fit)
+
+# Calculate SMI using age-specific slopes and L0
+adults_SMI <- calculate_SMI(adults, "mass", "tarsus", "ID", "year", b_SMA_adult, L0_adult)
+chicks_SMI <- calculate_SMI(chicks, "mass", "tarsus", "ID", "year", b_SMA_chick, L0_chick)
+```
+
+Then we combine the datasets to match SMI to our other variables:
+
+```{r}
+# Combine SMI data frames
+SMI_all <- bind_rows(adults_SMI, chicks_SMI)
+
+if (nrow(SMI_all) > 0) {
+  SMI_all$ID <- as.character(SMI_all$ID)
+  SMI_all$year <- as.integer(SMI_all$year)
+}
+
+nrow(adults_SMI)
+nrow(chicks_SMI)
+nrow(SMI_all)
+
+# Merge SMI back into full data by ID
+df_physiomeasures_SMI <- left_join(df_physiomeasures, SMI_all, by = c("ID", "year"))
+
+# Save output
+write.csv(df_physiomeasures_SMI, "df_physiomeasures_with_SMI.csv", row.names = FALSE)
+```
